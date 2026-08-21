@@ -42,7 +42,9 @@
 #define POLL_MS          200
 #define TIMEOUT_MS       120000
 #define LIB_POLLS_BEFORE_FAIL 10
-#define MAX_SPANS        16
+#define MAX_SPANS        32
+#define MAX_PROBE_ADDRS  128
+#define MAX_USE_SITES    256
 #define MAX_PROBES       8
 #define MAX_PATTERNS     4
 #define MAX_PAT_BYTES    32
@@ -220,6 +222,7 @@ static void profile_load(profile_t* pf, JNIEnv* env, jobject assets) {
 
 typedef struct {
     uintptr_t start, end;
+    int exec;
 } span_t;
 
 static int parse_maps(span_t* out, int max) {
@@ -232,16 +235,22 @@ static int parse_maps(span_t* out, int max) {
         uintptr_t s, e;
         char perms[8] = {0};
         if (sscanf(line, "%lx-%lx %7s", &s, &e, perms) != 3) continue;
-        if (!strchr(perms, 'x')) continue;
         char* slash = strrchr(line, '/');
         if (!slash) continue;
         size_t ll = strlen(slash);
         while (ll && (slash[ll - 1] == '\n' || slash[ll - 1] == '\r')) slash[--ll] = 0;
         size_t wl = strlen(g_lib_name);
         if (ll < wl || strcmp(slash + ll - wl, g_lib_name) != 0) continue;
+        /* merge with previous span if adjacent */
+        if (n > 0 && out[n - 1].end == s) {
+            out[n - 1].end = e;
+            out[n - 1].exec |= strchr(perms, 'x') != NULL;
+            continue;
+        }
         if (n < max) {
             out[n].start = s;
             out[n].end = e;
+            out[n].exec = strchr(perms, 'x') != NULL;
             n++;
         }
     }
@@ -356,6 +365,131 @@ static long count_probe(const profile_t* pf, uintptr_t rs, uintptr_t re,
     return hits;
 }
 
+/* ------------------------------------------------------------------ */
+/* probe cross-reference                                               */
+/*                                                                     */
+/* The judge constants live in .rodata (non-executable LOAD segment),  */
+/* so searching for them near code is useless. Instead: locate them    */
+/* anywhere in the module, then find ADRP+LDR pairs in .text that      */
+/* reference their pages - those LDR sites are the real fingerprint.   */
+/* ------------------------------------------------------------------ */
+
+static uintptr_t g_probe_addrs[MAX_PROBE_ADDRS];
+static int g_nprobe_addrs = 0;
+static uintptr_t g_probe_pages[16];
+static int g_nprobe_pages = 0;
+static uintptr_t g_use_sites[MAX_USE_SITES];
+static int g_nuse_sites = 0;
+static int g_xref_done = 0;
+
+static int is_adrp(uint32_t insn) {
+    return (insn & 0x9F000000u) == 0x90000000u;
+}
+
+static uintptr_t adrp_page(uintptr_t pc, uint32_t insn) {
+    int32_t immlo = (int32_t)((insn >> 29) & 0x3u);
+    int32_t immhi = (int32_t)((insn >> 5) & 0x7FFFFu);
+    int32_t imm = (immhi << 2) | immlo; /* 21-bit signed */
+    if (imm & 0x100000) imm -= 0x200000;
+    return (pc & ~(uintptr_t)0xFFFu) + ((uintptr_t)(uint64_t)imm << 12);
+}
+
+static int is_ldr_imm(uint32_t insn) {
+    uint32_t t = insn & 0xFFC00000u;
+    return t == 0xF9400000u || /* x  */
+           t == 0xB9400000u || /* w  */
+           t == 0xFD400000u || /* d  */
+           t == 0xBD400000u;   /* s  */
+}
+
+static uint32_t reg_rn(uint32_t insn) { return (insn >> 5) & 0x1Fu; }
+
+static int is_add_imm(uint32_t insn) {
+    return ((insn >> 23) & 0x3Fu) == 0x22u && !((insn >> 29) & 0x3u) &&
+           !(insn & 0x400000u); /* sh = 0 */
+}
+
+static void build_xref(JNIEnv* env, const span_t* spans, int nspan,
+                       const profile_t* pf) {
+    long pcnt[2] = {-1, -1};
+    for (int k = 0; k < pf->nprobes && k < 2; k++) {
+        uint64_t v = pf->probes[k];
+        long hits = 0;
+        for (int i = 0; i < nspan; i++) {
+            const unsigned char* p = (const unsigned char*)spans[i].start;
+            size_t len = (size_t)(spans[i].end - spans[i].start);
+            for (size_t o = 0; o + 8 <= len; o += 4) {
+                uint64_t w;
+                memcpy(&w, p + o, 8);
+                if (w != v) continue;
+                hits++;
+                if (g_nprobe_addrs < MAX_PROBE_ADDRS)
+                    g_probe_addrs[g_nprobe_addrs++] =
+                        spans[i].start + (uintptr_t)o;
+            }
+        }
+        pcnt[k] = hits;
+    }
+    for (int i = 0; i < g_nprobe_addrs; i++) {
+        uintptr_t pg = g_probe_addrs[i] & ~(uintptr_t)0xFFFu;
+        int seen = 0;
+        for (int j = 0; j < g_nprobe_pages; j++)
+            if (g_probe_pages[j] == pg) { seen = 1; break; }
+        if (!seen && g_nprobe_pages < 16) g_probe_pages[g_nprobe_pages++] = pg;
+    }
+
+    for (int i = 0; i < nspan; i++) {
+        if (!spans[i].exec) continue;
+        for (uintptr_t pc = spans[i].start; pc + 4 <= spans[i].end; pc += 4) {
+            uint32_t insn = *(volatile uint32_t*)pc;
+            if (!is_adrp(insn)) continue;
+            uintptr_t page = adrp_page(pc, insn) & ~(uintptr_t)0xFFFu;
+            int hit = 0;
+            for (int j = 0; j < g_nprobe_pages; j++)
+                if (g_probe_pages[j] == page) { hit = 1; break; }
+            if (!hit) continue;
+            uint32_t rd = insn & 0x1Fu;
+            for (int d = 1; d <= 6; d++) {
+                uintptr_t apc = pc + (uintptr_t)d * 4;
+                if (apc + 4 > spans[i].end) break;
+                uint32_t nx = *(volatile uint32_t*)apc;
+                if (is_ldr_imm(nx) && reg_rn(nx) == rd) {
+                    if (g_nuse_sites < MAX_USE_SITES)
+                        g_use_sites[g_nuse_sites++] = apc;
+                    break;
+                }
+                if (is_add_imm(nx) && reg_rn(nx) == rd) {
+                    uint32_t rd2 = nx & 0x1Fu;
+                    int done2 = 0;
+                    for (int e = d + 1; e <= 6; e++) {
+                        uintptr_t bpc = pc + (uintptr_t)e * 4;
+                        if (bpc + 4 > spans[i].end) break;
+                        uint32_t mx = *(volatile uint32_t*)bpc;
+                        if (is_ldr_imm(mx) && reg_rn(mx) == rd2) {
+                            if (g_nuse_sites < MAX_USE_SITES)
+                                g_use_sites[g_nuse_sites++] = bpc;
+                            done2 = 1;
+                            break;
+                        }
+                    }
+                    if (done2) break;
+                }
+            }
+        }
+    }
+    report(env, "probes p0=%ld p1=%ld addrs=%d pages=%d xref=%d", pcnt[0],
+           pcnt[1], g_nprobe_addrs, g_nprobe_pages, g_nuse_sites);
+}
+
+static int near_use_site(uintptr_t pc, uintptr_t window) {
+    for (int i = 0; i < g_nuse_sites; i++) {
+        uintptr_t d =
+            g_use_sites[i] > pc ? g_use_sites[i] - pc : pc - g_use_sites[i];
+        if (d <= window) return 1;
+    }
+    return 0;
+}
+
 typedef struct {
     uintptr_t pc;
     uint32_t insn;
@@ -416,7 +550,8 @@ static void collect_structural(const profile_t* pf, uintptr_t rs, uintptr_t re,
         if (im == 0 || im == -1) continue;
         uintptr_t tgt = bpc + (uintptr_t)(im * 4);
         if (tgt < rs || tgt >= re) continue;
-        if (!region_has_probe(pf, rs, re, pc)) {
+        if (!region_has_probe(pf, rs, re, pc) &&
+            !near_use_site(pc, (uintptr_t)pf->window * 4)) {
             (*gated_out)++;
             continue;
         }
@@ -632,13 +767,23 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
         span_t spans[MAX_SPANS];
         int n = parse_maps(spans, MAX_SPANS);
         if (n > 0) {
-            if (!ever_seen) report(env, "lib mapped: %d span(s)", n);
+            if (!ever_seen) {
+                int xe = 0;
+                for (int i = 0; i < n; i++) xe += spans[i].exec;
+                report(env, "lib mapped: %d span(s), exec=%d", n, xe);
+            }
+            if (!g_xref_done) {
+                build_xref(env, spans, n, &pf);
+                g_xref_done = 1;
+            }
             ever_seen = 1;
             g_lib_polls++;
             int verbose = g_lib_polls <= 2;
             int done = 0, decisive_fail = 0;
             for (int i = 0; i < n && !done; i++) {
-                int r = attempt(env, &pf, spans[i].start, spans[i].end, verbose);
+                if (!spans[i].exec) continue;
+                int r =
+                    attempt(env, &pf, spans[i].start, spans[i].end, verbose);
                 if (r == 1) done = 1;
                 else if (r < 0) decisive_fail = 1;
             }
