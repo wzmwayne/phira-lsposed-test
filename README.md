@@ -55,12 +55,17 @@ push 到 main 或手动触发 → Artifacts 下载 `phira-lsposed-test-debug.apk
 ## 使用
 
 1. 安装 APK，在 LSPosed 中启用本模块；
-2. 作用域勾选你的 Phira 测试包名；
-3. 若包名不在白名单内，编辑
-   `app/src/main/java/cn/test/phirauto/MainHook.java` 的 `TARGET_PACKAGES`
-   后重新触发 CI；
-4. 启动游戏，看到 Toast「Phira 方向1 注入成功」即表示分支已改写；
-   定位失败时静默退出（logcat 过滤 `PhiraAgent` 可见原因），宿主不受影响。
+2. 作用域勾选你的 Phira 测试包名，**强制停止游戏后重新启动**（LSPosed 只对新启动的进程生效）；
+3. 无需改包名白名单——目标选择完全由作用域驱动；若目标库名不是 `libphira.so`，
+   在 profile 中加一行 `LIB <名字>` 即可；
+4. Toast 反馈含义：
+   - `模块已加载: <包名>` —— Hook 已生效（没看到 = 模块未注入：检查启用状态/作用域/重启）；
+   - `Phira 方向1 注入成功` —— 分支已改写；
+   - `未出现目标 so` / `特征未匹配` / `候选歧义` —— 定位失败原因，详见 logcat：
+     ```bash
+     adb logcat -s PhiraAgent
+     ```
+     超时且从未见到目标库时，会自动 dump 进程内全部可执行 so 列表便于排查。
 
 ## 工程
 

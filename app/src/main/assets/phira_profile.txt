@@ -5,6 +5,7 @@
 #
 # WINDOW    +/- byte range searched for PROBE fingerprints around a candidate branch
 # MAX_CAND  abort unless exactly this many candidates survive filtering (fail-safe)
+# LIB       target library name (default libphira.so); bare name or full path suffix
 # PROBE     16-hex-digit little-endian f64 literal that must exist near the target
 # PATTERN   explicit masked byte pattern: hex bytes, ".." = wildcard byte,
 #           followed by the offset of the branch instruction inside the match
@@ -12,6 +13,7 @@
 
 WINDOW 4096
 MAX_CAND 1
+LIB libphira.so
 
 # prpr judge constants, judge.rs:20-21:
 #   LIMIT_PERFECT = 0.08 -> 0x3FB47AE147AE147B

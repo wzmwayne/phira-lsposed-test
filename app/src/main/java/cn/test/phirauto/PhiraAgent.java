@@ -12,8 +12,8 @@ public final class PhiraAgent {
     }
 
     /**
-     * Blocks until libphira.so is located and patched, or until timeout.
-     * Returns true only when a branch was actually rewritten.
+     * Blocks until the target library is located and patched, or until timeout.
+     * Returns a status code: 1 = patched; negative = failure reason.
      */
-    public static native boolean arm(AssetManager assets);
+    public static native int arm(AssetManager assets);
 }

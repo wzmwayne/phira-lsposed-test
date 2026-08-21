@@ -14,19 +14,13 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 public class MainHook implements IXposedHookLoadPackage {
 
-    // Self-built test builds ONLY — edit to match your applicationId.
-    private static final String[] TARGET_PACKAGES = {
-            "cn.mivik.phira",
-            "com.mivik.phira",
-    };
+    // Target selection is driven by the LSPosed scope (check your Phira build there).
+    // No hard-coded package gate: every scoped process reports and probes for libphira.so.
 
     private static final AtomicBoolean FIRED = new AtomicBoolean(false);
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpp) {
-        if (!matches(lpp.packageName)) {
-            return;
-        }
         try {
             XposedHelpers.findAndHookMethod(
                     "android.app.Instrumentation", lpp.classLoader,
@@ -38,19 +32,18 @@ public class MainHook implements IXposedHookLoadPackage {
                                 return;
                             }
                             final Application app = (Application) param.args[0];
+                            toast(app, "模块已加载: " + lpp.packageName);
                             new Thread(new Runnable() {
                                 @Override
                                 public void run() {
-                                    boolean ok;
+                                    int st;
                                     try {
-                                        ok = PhiraAgent.arm(app.getAssets());
+                                        st = PhiraAgent.arm(app.getAssets());
                                     } catch (Throwable t) {
                                         XposedHelpers.log(t);
-                                        ok = false;
+                                        st = -100;
                                     }
-                                    if (ok) {
-                                        notifyInjected(app);
-                                    }
+                                    toast(app, describe(st));
                                 }
                             }, "phira-agent").start();
                         }
@@ -60,20 +53,26 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    private static boolean matches(String pkg) {
-        for (String p : TARGET_PACKAGES) {
-            if (p.equals(pkg)) {
-                return true;
-            }
+    private static String describe(int st) {
+        switch (st) {
+            case 1:
+                return "Phira 方向1 注入成功";
+            case -1:
+                return "注入失败: 进程内未出现目标 so (检查作用域/库名)";
+            case -2:
+                return "注入失败: 特征未匹配 (logcat 过滤 PhiraAgent)";
+            case -3:
+                return "注入失败: 候选歧义已放弃";
+            default:
+                return "注入失败: 内部错误 st=" + st;
         }
-        return false;
     }
 
-    private static void notifyInjected(final Application app) {
+    private static void toast(final Application app, final String msg) {
         new Handler(Looper.getMainLooper()).post(new Runnable() {
             @Override
             public void run() {
-                Toast.makeText(app, "Phira 方向1 注入成功", Toast.LENGTH_LONG).show();
+                Toast.makeText(app, msg, Toast.LENGTH_LONG).show();
             }
         });
     }

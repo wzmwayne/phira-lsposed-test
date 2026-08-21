@@ -35,7 +35,7 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-#define LIB_NAME         "libphira.so"
+#define DEFAULT_LIB_NAME "libphira.so"
 #define PROFILE_ASSET    "phira_profile.txt"
 #define PROFILE_OVERRIDE "/data/local/tmp/phira_autoplay_profile.txt"
 #define POLL_MS          200
@@ -51,6 +51,8 @@
 /* ------------------------------------------------------------------ */
 /* profile                                                             */
 /* ------------------------------------------------------------------ */
+
+static const char* g_lib_name = DEFAULT_LIB_NAME;
 
 typedef struct {
     unsigned char bytes[MAX_PAT_BYTES];
@@ -99,6 +101,15 @@ static void profile_line(profile_t* pf, char* s) {
     } else if (!strcmp(cmd, "MAX_CAND")) {
         int v = atoi(rest);
         if (v >= 1 && v <= MAX_CANDS) pf->max_cand = v;
+    } else if (!strcmp(cmd, "LIB")) {
+        char name[128];
+        if (sscanf(rest, "%127s", name) == 1 && name[0] == '/') {
+            g_lib_name = strdup(name); /* full-path suffix match */
+        } else if (sscanf(rest, "%127s", name) == 1 && strchr(name, '.')) {
+            static char buf[128];
+            snprintf(buf, sizeof(buf), "/%s", name);
+            g_lib_name = buf; /* bare file-name match */
+        }
     } else if (!strcmp(cmd, "PROBE")) {
         char hex[32];
         if (pf->nprobes >= MAX_PROBES) return;
@@ -216,7 +227,7 @@ static int parse_maps(span_t* out, int max) {
     char line[512];
     int n = 0;
     while (fgets(line, sizeof(line), f)) {
-        if (!strstr(line, LIB_NAME)) continue;
+        if (!strstr(line, g_lib_name)) continue;
         uintptr_t s, e;
         char perms[8] = {0};
         if (sscanf(line, "%lx-%lx %7s", &s, &e, perms) != 3) continue;
@@ -225,10 +236,8 @@ static int parse_maps(span_t* out, int max) {
         if (!slash) continue;
         size_t ll = strlen(slash);
         while (ll && (slash[ll - 1] == '\n' || slash[ll - 1] == '\r')) slash[--ll] = 0;
-        char want[64];
-        snprintf(want, sizeof(want), "/%s", LIB_NAME);
-        size_t wl = strlen(want);
-        if (ll < wl || strcmp(slash + ll - wl, want) != 0) continue;
+        size_t wl = strlen(g_lib_name);
+        if (ll < wl || strcmp(slash + ll - wl, g_lib_name) != 0) continue;
         if (n < max) {
             out[n].start = s;
             out[n].end = e;
@@ -237,6 +246,31 @@ static int parse_maps(span_t* out, int max) {
     }
     fclose(f);
     return n;
+}
+
+/* Diagnostic: list every executable mapping so mismatches are visible. */
+static void dump_loaded_libs(void) {
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return;
+    char line[512];
+    const char* last = NULL;
+    char lastbuf[512];
+    int count = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char perms[8] = {0};
+        char* slash = strrchr(line, '/');
+        if (!slash || !strstr(slash, ".so")) continue;
+        if (sscanf(line, "%*x-%*x %7s", perms) != 1) continue;
+        if (!strchr(perms, 'x')) continue;
+        size_t ll = strlen(slash);
+        while (ll && (slash[ll - 1] == '\n' || slash[ll - 1] == '\r')) slash[--ll] = 0;
+        if (last && strcmp(last, slash) == 0) continue;
+        strncpy(lastbuf, slash, sizeof(lastbuf) - 1);
+        last = lastbuf;
+        LOGI("loaded-lib: %s", slash);
+        if (++count >= 40) break;
+    }
+    fclose(f);
 }
 
 /* ------------------------------------------------------------------ */
@@ -483,22 +517,26 @@ static int attempt(const profile_t* pf, uintptr_t rs, uintptr_t re) {
     return -1;
 }
 
-JNIEXPORT jboolean JNICALL
+/* status codes: 1 = patched; -1 = target lib never appeared;
+ * -2 = lib seen but no structural/pattern match; -3 = ambiguous, aborted */
+JNIEXPORT jint JNICALL
 Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) {
     profile_t pf;
     profile_load(&pf, env, assets);
-    LOGI("agent up: window=%ld probes=%d patterns=%d max_cand=%d", pf.window,
-         pf.nprobes, pf.npats, pf.max_cand);
+    LOGI("agent up: lib=%s window=%ld probes=%d patterns=%d max_cand=%d",
+         g_lib_name, pf.window, pf.nprobes, pf.npats, pf.max_cand);
 
     long waited = 0;
+    int ever_seen = 0;
     while (waited < TIMEOUT_MS) {
         if (g_failed) {
             LOGE("giving up permanently - nothing was written");
-            return JNI_FALSE;
+            return -3;
         }
         span_t spans[MAX_SPANS];
         int n = parse_maps(spans, MAX_SPANS);
         if (n > 0) {
+            ever_seen = 1;
             g_lib_polls++;
             int done = 0, decisive_fail = 0;
             for (int i = 0; i < n && !done; i++) {
@@ -508,7 +546,7 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
             }
             if (done) {
                 LOGI("injection complete after %ld ms", waited);
-                return JNI_TRUE;
+                return 1;
             }
             if (decisive_fail && g_lib_polls >= LIB_POLLS_BEFORE_FAIL) {
                 g_failed = 1;
@@ -519,6 +557,11 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
         usleep(POLL_MS * 1000);
         waited += POLL_MS;
     }
-    LOGE("timeout - %s not located, nothing was written", LIB_NAME);
-    return JNI_FALSE;
+    LOGE("timeout after %ld ms - target '%s' %s, nothing was written", waited,
+         g_lib_name, ever_seen ? "seen but not matched" : "never appeared");
+    if (!ever_seen) {
+        dump_loaded_libs();
+        return -1;
+    }
+    return -2;
 }
