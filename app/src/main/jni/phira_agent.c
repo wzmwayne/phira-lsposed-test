@@ -292,6 +292,17 @@ static int is_tst_w_1(uint32_t insn) {
 
 static int is_bcond(uint32_t insn) { return (insn >> 24) == 0x54; }
 
+static int is_cbz_w(uint32_t insn) {
+    uint32_t op = insn >> 24;
+    return op == 0x34 || op == 0x35; /* CBZ / CBNZ on Wn */
+}
+
+static int is_and_w_1(uint32_t insn) {
+    /* AND Wn, Wm, #1 : logical immediate, N/immr/imms all zero */
+    return ((insn >> 23) & 0x1FFu) == 0x24u &&
+           (insn & 0x003FFC00u) == 0;
+}
+
 static int is_b(uint32_t insn) { return (insn & 0xFC000000u) == 0x14000000u; }
 
 static int is_bl(uint32_t insn) { return (insn & 0xFC000000u) == 0x94000000u; }
@@ -304,7 +315,7 @@ static int32_t imm19_of(uint32_t insn) { return ((int32_t)insn << 8) >> 13; }
 
 static int32_t branch_imm(uint32_t insn) {
     if (is_tbz_bit0(insn)) return imm14_of(insn);
-    if (is_bcond(insn)) return imm19_of(insn);
+    if (is_bcond(insn) || is_cbz_w(insn)) return imm19_of(insn);
     return 0;
 }
 
@@ -332,6 +343,19 @@ static int region_has_probe(const profile_t* pf, uintptr_t rs, uintptr_t re,
     return 0;
 }
 
+static long count_probe(const profile_t* pf, uintptr_t rs, uintptr_t re,
+                        uint64_t v) {
+    const unsigned char* p = (const unsigned char*)rs;
+    size_t len = (size_t)(re - rs);
+    long hits = 0;
+    for (size_t i = 0; i + 8 <= len; i++) {
+        uint64_t w;
+        memcpy(&w, p + i, 8);
+        if (w == v) hits++;
+    }
+    return hits;
+}
+
 typedef struct {
     uintptr_t pc;
     uint32_t insn;
@@ -348,13 +372,16 @@ static void push_cand(cand_t* cands, int* n, uintptr_t pc, uint32_t insn) {
 }
 
 static void collect_structural(const profile_t* pf, uintptr_t rs, uintptr_t re,
-                               cand_t* cands, int* n) {
+                               cand_t* cands, int* n, long* raw_tbz,
+                               long* raw_tst, long* raw_cbz,
+                               long* gated_out) {
     for (uintptr_t pc = (rs + 3) & ~(uintptr_t)3u; pc + 4 <= re; pc += 4) {
         uint32_t insn = *(volatile uint32_t*)pc;
         uintptr_t bpc = 0;
         uint32_t binsn = 0;
 
         if (is_tbz_bit0(insn)) {
+            (*raw_tbz)++;
             bpc = pc;
             binsn = insn;
         } else if (is_tst_w_1(insn)) {
@@ -362,8 +389,23 @@ static void collect_structural(const profile_t* pf, uintptr_t rs, uintptr_t re,
                 if (pc + (uintptr_t)d * 4 + 4 > re) break;
                 uint32_t nx = *(volatile uint32_t*)(pc + (uintptr_t)d * 4);
                 if (is_bcond(nx)) {
+                    (*raw_tst)++;
                     bpc = pc + (uintptr_t)d * 4;
                     binsn = nx;
+                    break;
+                }
+            }
+        } else if (is_cbz_w(insn)) {
+            /* cbz/cbnz wN preceded by "and wN, wX, #1" */
+            uint32_t rt = insn & 0x1Fu;
+            for (int d = 1; d <= 4; d++) {
+                if (pc < rs + (uintptr_t)d * 4) break;
+                uint32_t pv =
+                    *(volatile uint32_t*)(pc - (uintptr_t)d * 4);
+                if (is_and_w_1(pv) && (pv & 0x1Fu) == rt) {
+                    (*raw_cbz)++;
+                    bpc = pc;
+                    binsn = insn;
                     break;
                 }
             }
@@ -374,7 +416,10 @@ static void collect_structural(const profile_t* pf, uintptr_t rs, uintptr_t re,
         if (im == 0 || im == -1) continue;
         uintptr_t tgt = bpc + (uintptr_t)(im * 4);
         if (tgt < rs || tgt >= re) continue;
-        if (!region_has_probe(pf, rs, re, pc)) continue;
+        if (!region_has_probe(pf, rs, re, pc)) {
+            (*gated_out)++;
+            continue;
+        }
 
         push_cand(cands, n, bpc, binsn);
     }
@@ -521,8 +566,20 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
 
     cand_t cands[MAX_CANDS];
     int n = 0;
-    collect_structural(pf, rs, re, cands, &n);
+    long raw_tbz = 0, raw_tst = 0, raw_cbz = 0, gated_out = 0;
+    collect_structural(pf, rs, re, cands, &n, &raw_tbz, &raw_tst, &raw_cbz,
+                       &gated_out);
     collect_patterns(pf, rs, re, cands, &n);
+
+    if (verbose) {
+        long p0 = count_probe(pf, rs, re, pf->probes[0]);
+        long p1 = pf->nprobes > 1 ? count_probe(pf, rs, re, pf->probes[1]) : -1;
+        report(env,
+               "span %ldMB: raw tbz=%ld tst=%ld cbz=%ld gated=%ld "
+               "probe0=%ld probe1=%ld",
+               (long)((re - rs) >> 20), raw_tbz, raw_tst, raw_cbz, gated_out,
+               p0, p1);
+    }
 
     if (n == 0) {
         if (verbose) report(env, "scan [%lx,%lx): no candidates", rs, re);
