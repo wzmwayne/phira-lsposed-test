@@ -1,0 +1,23 @@
+# PhiraAgent location profile (v0.1 defaults)
+# Adapt to future libphira.so builds WITHOUT touching C code:
+#   1) edit this file and rebuild in CI, or
+#   2) push an edited copy to /data/local/tmp/phira_autoplay_profile.txt (live override)
+#
+# WINDOW    +/- byte range searched for PROBE fingerprints around a candidate branch
+# MAX_CAND  abort unless exactly this many candidates survive filtering (fail-safe)
+# PROBE     16-hex-digit little-endian f64 literal that must exist near the target
+# PATTERN   explicit masked byte pattern: hex bytes, ".." = wildcard byte,
+#           followed by the offset of the branch instruction inside the match
+#           (a lone "-1" disables pattern mode)
+
+WINDOW 4096
+MAX_CAND 1
+
+# prpr judge constants, judge.rs:20-21:
+#   LIMIT_PERFECT = 0.08 -> 0x3FB47AE147AE147B
+#   LIMIT_GOOD    = 0.16 -> 0x3FC47AE147AE147B
+PROBE 3FB47AE147AE147B
+PROBE 3FC47AE147AE147B
+
+# example explicit-pattern line (disabled by default):
+# PATTERN ..230037 0
