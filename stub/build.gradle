@@ -1,0 +1,13 @@
+plugins {
+    id 'java-library'
+}
+
+// Compile-time Xposed API stubs only. NEVER ship these classes inside the
+// module APK: if the module classloader resolves our copies instead of the
+// real ones injected by LSPosed, the module activates with zero effect.
+// `compileOnly` keeps them out of the final dex.
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}

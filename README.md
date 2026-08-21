@@ -54,18 +54,23 @@ push 到 main 或手动触发 → Artifacts 下载 `phira-lsposed-test-debug.apk
 
 ## 使用
 
-1. 安装 APK，在 LSPosed 中启用本模块；
-2. 作用域勾选你的 Phira 测试包名，**强制停止游戏后重新启动**（LSPosed 只对新启动的进程生效）；
-3. 无需改包名白名单——目标选择完全由作用域驱动；若目标库名不是 `libphira.so`，
-   在 profile 中加一行 `LIB <名字>` 即可；
-4. Toast 反馈含义：
-   - `模块已加载: <包名>` —— Hook 已生效（没看到 = 模块未注入：检查启用状态/作用域/重启）；
-   - `Phira 方向1 注入成功` —— 分支已改写；
-   - `未出现目标 so` / `特征未匹配` / `候选歧义` —— 定位失败原因，详见 logcat：
-     ```bash
-     adb logcat -s PhiraAgent
-     ```
-     超时且从未见到目标库时，会自动 dump 进程内全部可执行 so 列表便于排查。
+1. 安装 APK，在 LSPosed 中启用本模块，作用域勾选你的 Phira 测试包名；
+2. **强制停止游戏后重新启动**（LSPosed 只对新启动的进程生效）；
+3. 游戏内顶部会出现「PhiraAgent 日志」悬浮面板（注入在应用自身视图层级中，
+   无需悬浮窗权限），点「关闭」可收起；完整日志：
+   ```bash
+   adb logcat -s PhiraAgent
+   ```
+4. 面板内容含义：
+   - `app created: <包名>` —— Hook 已生效（没看到 = 模块未注入：检查启用状态/作用域/重启）；
+   - `arm status=1 (注入成功)` —— 分支已改写；
+   - `目标 so 未出现` / `特征未匹配` / `候选歧义` —— 定位失败原因，logcat 有细节，
+     超时且从未见到目标库时会自动 dump 进程内全部可执行 so 列表便于排查。
+
+## 实现说明
+
+- Xposed API 以独立 `:stub` 模块 `compileOnly` 引入，**不打包进 APK**——若 APK 内
+  携带 `de.robv.*` 副本，可能遮蔽 LSPosed 注入的真实 API，导致模块"已启用但零反应"。
 
 ## 工程
 

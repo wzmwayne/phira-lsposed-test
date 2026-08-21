@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "phira-lsposed-test"
 include ':app'
+include ':stub'
