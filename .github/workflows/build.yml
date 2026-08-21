@@ -21,12 +21,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
-          # Persists ~/.gradle (dependencies + build cache) across runs
-          cache: true
-          cache-read-only: false
-          cache-dependency-path: |
-            **/*.gradle
-            gradle.properties
+          # Caching of ~/.gradle (dependencies + build cache) is enabled by default;
+          # the cache key is derived automatically from the gradle build files.
 
       - name: Build APK (cloud only)
         run: gradle assembleDebug --no-daemon --stacktrace
