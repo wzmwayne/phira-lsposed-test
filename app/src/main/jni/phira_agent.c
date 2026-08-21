@@ -57,6 +57,8 @@
 
 static const char* g_lib_name = DEFAULT_LIB_NAME;
 
+static void report(JNIEnv* env, const char* fmt, ...); /* fwd: defined later */
+
 typedef struct {
     unsigned char bytes[MAX_PAT_BYTES];
     unsigned char wild[MAX_PAT_BYTES]; /* 1 = wildcard byte */
