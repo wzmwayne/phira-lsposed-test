@@ -103,7 +103,7 @@ public final class OverlayLog {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        ScrollView scroll = new ScrollView(activity);
+        ScrollView scroll = new PassThroughScrollView(activity);
         TextView text = new TextView(activity);
         text.setTextColor(Color.WHITE);
         text.setTextSize(9f);
@@ -120,6 +120,17 @@ public final class OverlayLog {
         panel.addView(scroll);
 
         return panel;
+    }
+
+    /** Scrollable for display, but every touch falls through to the game. */
+    private static final class PassThroughScrollView extends ScrollView {
+        PassThroughScrollView(android.content.Context c) { super(c); }
+
+        @Override
+        public boolean onTouchEvent(android.view.MotionEvent e) { return false; }
+
+        @Override
+        public boolean onInterceptTouchEvent(android.view.MotionEvent e) { return false; }
     }
 
     private static int dp(Activity a, int v) {

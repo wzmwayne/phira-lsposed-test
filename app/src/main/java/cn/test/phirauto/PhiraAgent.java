@@ -16,4 +16,9 @@ public final class PhiraAgent {
      * Returns a status code: 1 = patched; negative = failure reason.
      */
     public static native int arm(AssetManager assets);
+
+    /** Called from native to mirror progress onto the overlay panel. */
+    public static void report(String line) {
+        OverlayLog.log("[agent] " + line);
+    }
 }

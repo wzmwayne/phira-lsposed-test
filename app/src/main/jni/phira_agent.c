@@ -23,6 +23,7 @@
 #include <android/asset_manager_jni.h>
 
 #include <errno.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -492,7 +493,30 @@ static int rewrite_branch(uintptr_t rs, uintptr_t re, uintptr_t pc,
 static int g_lib_polls = 0;
 static int g_failed = 0;
 
-static int attempt(const profile_t* pf, uintptr_t rs, uintptr_t re) {
+/* panel-direct reporting: mirror progress onto the in-app overlay so
+ * diagnosis never depends on logcat availability */
+static jclass g_cls = NULL;
+static jmethodID g_report_mid = NULL;
+
+static void report(JNIEnv* env, const char* fmt, ...) {
+    if (!env || !g_report_mid) return;
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    jstring s = (*env)->NewStringUTF(env, buf);
+    if (!s) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        return;
+    }
+    (*env)->CallStaticVoidMethod(env, g_cls, g_report_mid, s);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, s);
+}
+
+static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
+                   int verbose) {
     if (re <= rs || re - rs > MAX_SPAN_BYTES) return 0;
 
     cand_t cands[MAX_CANDS];
@@ -500,9 +524,13 @@ static int attempt(const profile_t* pf, uintptr_t rs, uintptr_t re) {
     collect_structural(pf, rs, re, cands, &n);
     collect_patterns(pf, rs, re, cands, &n);
 
-    if (n == 0) return 0;
+    if (n == 0) {
+        if (verbose) report(env, "scan [%lx,%lx): no candidates", rs, re);
+        return 0;
+    }
     LOGI("candidates in [%p,%p): %d (max_cand=%d)", (void*)rs, (void*)re, n,
          pf->max_cand);
+    if (verbose) report(env, "scan: %d candidate(s), max_cand=%d", n, pf->max_cand);
 
     if (n != pf->max_cand) {
         LOGE("ambiguous (%d != %d) - refusing to patch", n, pf->max_cand);
@@ -511,6 +539,9 @@ static int attempt(const profile_t* pf, uintptr_t rs, uintptr_t re) {
 
     for (int i = 0; i < n; i++) {
         int decision = resolve_auto_side(rs, re, cands[i].pc, cands[i].insn);
+        if (verbose)
+            report(env, "branch @%lx insn=%08x side=%d", cands[i].pc, cands[i].insn,
+                   decision);
         if (rewrite_branch(rs, re, cands[i].pc, cands[i].insn, decision))
             return 1;
     }
@@ -521,26 +552,36 @@ static int attempt(const profile_t* pf, uintptr_t rs, uintptr_t re) {
  * -2 = lib seen but no structural/pattern match; -3 = ambiguous, aborted */
 JNIEXPORT jint JNICALL
 Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) {
+    g_cls = (jclass)(*env)->NewGlobalRef(env, clazz);
+    g_report_mid = (*env)->GetStaticMethodID(env, clazz, "report",
+                                             "(Ljava/lang/String;)V");
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+
     profile_t pf;
     profile_load(&pf, env, assets);
     LOGI("agent up: lib=%s window=%ld probes=%d patterns=%d max_cand=%d",
          g_lib_name, pf.window, pf.nprobes, pf.npats, pf.max_cand);
+    report(env, "profile: lib=%s win=%ld probes=%d pats=%d max=%d", g_lib_name,
+           pf.window, pf.nprobes, pf.npats, pf.max_cand);
 
     long waited = 0;
     int ever_seen = 0;
     while (waited < TIMEOUT_MS) {
         if (g_failed) {
             LOGE("giving up permanently - nothing was written");
+            report(env, "ambiguous candidates - aborted, nothing written");
             return -3;
         }
         span_t spans[MAX_SPANS];
         int n = parse_maps(spans, MAX_SPANS);
         if (n > 0) {
+            if (!ever_seen) report(env, "lib mapped: %d span(s)", n);
             ever_seen = 1;
             g_lib_polls++;
+            int verbose = g_lib_polls <= 2;
             int done = 0, decisive_fail = 0;
             for (int i = 0; i < n && !done; i++) {
-                int r = attempt(&pf, spans[i].start, spans[i].end);
+                int r = attempt(env, &pf, spans[i].start, spans[i].end, verbose);
                 if (r == 1) done = 1;
                 else if (r < 0) decisive_fail = 1;
             }
@@ -554,6 +595,9 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
         } else {
             g_lib_polls = 0;
         }
+        if ((waited / POLL_MS) % 25 == 24)
+            report(env, "waiting... %lds seen=%d polls=%d", waited / 1000,
+                   ever_seen, g_lib_polls);
         usleep(POLL_MS * 1000);
         waited += POLL_MS;
     }
@@ -561,7 +605,10 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
          g_lib_name, ever_seen ? "seen but not matched" : "never appeared");
     if (!ever_seen) {
         dump_loaded_libs();
+        report(env, "timeout: '%s' never appeared (see logcat for lib list)",
+               g_lib_name);
         return -1;
     }
+    report(env, "timeout: lib seen but no match");
     return -2;
 }

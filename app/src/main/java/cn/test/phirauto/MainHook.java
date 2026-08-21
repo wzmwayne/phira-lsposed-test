@@ -46,6 +46,7 @@ public class MainHook implements IXposedHookLoadPackage {
         if (armed) return;
         armed = true;
         new Thread(() -> {
+            OverlayLog.log("agent thread running");
             int st;
             try {
                 st = PhiraAgent.arm(app.getAssets());
@@ -56,6 +57,7 @@ public class MainHook implements IXposedHookLoadPackage {
             }
             OverlayLog.log("arm status=" + st + describe(st));
         }, "phira-agent").start();
+        OverlayLog.log("agent thread started");
     }
 
     private static String describe(int st) {
