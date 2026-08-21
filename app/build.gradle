@@ -5,6 +5,8 @@ plugins {
 android {
     namespace 'cn.test.phirauto'
     compileSdk 34
+    // Preinstalled on GitHub ubuntu-latest runners — avoids a ~600MB NDK download per run.
+    ndkVersion '26.3.11579264'
 
     defaultConfig {
         applicationId "cn.test.phirauto"
