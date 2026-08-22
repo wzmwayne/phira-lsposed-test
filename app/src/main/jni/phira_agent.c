@@ -70,7 +70,9 @@ typedef struct {
     uint64_t probes[MAX_PROBES];
     int nprobes;
     long window;
+    long xref_win; /* proximity to adrp+ldr use sites */
     int max_cand;
+    int best_of_n; /* allow ranked best-of-N selection when N != max_cand */
     pat_t pats[MAX_PATTERNS];
     int npats;
 } profile_t;
@@ -87,7 +89,9 @@ static void profile_defaults(profile_t* pf) {
     pf->probes[pf->nprobes++] = 0x3FB47AE147AE147BULL; /* f64 0.08 */
     pf->probes[pf->nprobes++] = 0x3FC47AE147AE147BULL; /* f64 0.16 */
     pf->window = 4096;
+    pf->xref_win = 2048;
     pf->max_cand = 1;
+    pf->best_of_n = 1;
 }
 
 static void profile_parse(profile_t* pf, char* buf);
@@ -103,9 +107,14 @@ static void profile_line(profile_t* pf, char* s) {
     if (!strcmp(cmd, "WINDOW")) {
         long v = atol(rest);
         if (v >= 256 && v <= 65536) pf->window = v;
+    } else if (!strcmp(cmd, "XREF_WIN")) {
+        long v = atol(rest);
+        if (v >= 64 && v <= 65536) pf->xref_win = v;
     } else if (!strcmp(cmd, "MAX_CAND")) {
         int v = atoi(rest);
         if (v >= 1 && v <= MAX_CANDS) pf->max_cand = v;
+    } else if (!strcmp(cmd, "BEST_OF_N")) {
+        pf->best_of_n = atoi(rest) != 0;
     } else if (!strcmp(cmd, "LIB")) {
         char name[128];
         if (sscanf(rest, "%127s", name) == 1 && name[0] == '/') {
@@ -382,7 +391,15 @@ static uintptr_t g_probe_pages[16];
 static int g_nprobe_pages = 0;
 static uintptr_t g_use_sites[MAX_USE_SITES];
 static int g_nuse_sites = 0;
+static int g_nuse_sites_total = 0;
 static int g_xref_done = 0;
+
+static void push_site(uintptr_t pc) {
+    g_nuse_sites_total++;
+    for (int i = 0; i < g_nuse_sites; i++)
+        if (g_use_sites[i] == pc) return;
+    if (g_nuse_sites < MAX_USE_SITES) g_use_sites[g_nuse_sites++] = pc;
+}
 
 static int is_adrp(uint32_t insn) {
     return (insn & 0x9F000000u) == 0x90000000u;
@@ -409,6 +426,56 @@ static uint32_t reg_rn(uint32_t insn) { return (insn >> 5) & 0x1Fu; }
 static int is_add_imm(uint32_t insn) {
     return ((insn >> 23) & 0x3Fu) == 0x22u && !((insn >> 29) & 0x3u) &&
            !(insn & 0x400000u); /* sh = 0 */
+}
+
+static uint32_t ldr_pimm(uint32_t insn) {
+    uint32_t t = insn & 0xFFC00000u;
+    uint32_t scale = (t == 0xF9400000u || t == 0xFD400000u) ? 8u : 4u;
+    return ((insn >> 10) & 0xFFFu) * scale;
+}
+
+static uint32_t add_imm12(uint32_t insn) { return (insn >> 10) & 0xFFFu; }
+
+/* human-readable form of a candidate branch, for panel diagnostics */
+static const char* form_name(uint32_t insn) {
+    if (is_tbz_bit0(insn)) return (insn >> 24) == 0x37 ? "tbnz#0" : "tbz#0";
+    if (is_bcond(insn)) {
+        switch (insn & 0xFu) {
+            case 0: return "b.eq";
+            case 1: return "b.ne";
+            case 2: return "b.cs";
+            case 3: return "b.cc";
+            case 4: return "b.mi";
+            case 5: return "b.pl";
+            case 6: return "b.vs";
+            case 7: return "b.vc";
+            case 8: return "b.hi";
+            case 9: return "b.ls";
+            case 10: return "b.ge";
+            case 11: return "b.lt";
+            case 12: return "b.gt";
+            case 13: return "b.le";
+            default: return "b.?";
+        }
+    }
+    if (is_cbz_w(insn)) return (insn >> 24) == 0x35 ? "cbnz" : "cbz";
+    return "?";
+}
+
+static long dist_to_sites(uintptr_t pc) {
+    long best = -1;
+    for (int i = 0; i < g_nuse_sites; i++) {
+        long d = g_use_sites[i] > pc ? (long)(g_use_sites[i] - pc)
+                                     : (long)(pc - g_use_sites[i]);
+        if (best < 0 || d < best) best = d;
+    }
+    return best;
+}
+
+static int off_in_list(const uint32_t* los, int nlos, uint32_t off) {
+    for (int q = 0; q < nlos; q++)
+        if (los[q] == off) return 1;
+    return 0;
 }
 
 static void build_xref(JNIEnv* env, const span_t* spans, int nspan,
@@ -446,41 +513,45 @@ static void build_xref(JNIEnv* env, const span_t* spans, int nspan,
             uint32_t insn = *(volatile uint32_t*)pc;
             if (!is_adrp(insn)) continue;
             uintptr_t page = adrp_page(pc, insn) & ~(uintptr_t)0xFFFu;
-            int hit = 0;
-            for (int j = 0; j < g_nprobe_pages; j++)
-                if (g_probe_pages[j] == page) { hit = 1; break; }
-            if (!hit) continue;
+
+            /* page offsets of OUR probes living on this adrp target page */
+            uint32_t los[16];
+            int nlos = 0;
+            for (int j = 0; j < g_nprobe_addrs && nlos < 16; j++)
+                if ((g_probe_addrs[j] & ~(uintptr_t)0xFFFu) == page)
+                    los[nlos++] = (uint32_t)(g_probe_addrs[j] & 0xFFFu);
+            if (!nlos) continue;
+
             uint32_t rd = insn & 0x1Fu;
             for (int d = 1; d <= 6; d++) {
                 uintptr_t apc = pc + (uintptr_t)d * 4;
                 if (apc + 4 > spans[i].end) break;
                 uint32_t nx = *(volatile uint32_t*)apc;
                 if (is_ldr_imm(nx) && reg_rn(nx) == rd) {
-                    if (g_nuse_sites < MAX_USE_SITES)
-                        g_use_sites[g_nuse_sites++] = apc;
-                    break;
+                    if (off_in_list(los, nlos, ldr_pimm(nx))) push_site(apc);
+                    break; /* chain consumed by this ldr either way */
                 }
                 if (is_add_imm(nx) && reg_rn(nx) == rd) {
+                    uint32_t imm = add_imm12(nx);
+                    if (!off_in_list(los, nlos, imm)) continue;
                     uint32_t rd2 = nx & 0x1Fu;
-                    int done2 = 0;
                     for (int e = d + 1; e <= 6; e++) {
                         uintptr_t bpc = pc + (uintptr_t)e * 4;
                         if (bpc + 4 > spans[i].end) break;
                         uint32_t mx = *(volatile uint32_t*)bpc;
                         if (is_ldr_imm(mx) && reg_rn(mx) == rd2) {
-                            if (g_nuse_sites < MAX_USE_SITES)
-                                g_use_sites[g_nuse_sites++] = bpc;
-                            done2 = 1;
+                            push_site(bpc);
                             break;
                         }
                     }
-                    if (done2) break;
+                    break;
                 }
             }
         }
     }
-    report(env, "probes p0=%ld p1=%ld addrs=%d pages=%d xref=%d", pcnt[0],
-           pcnt[1], g_nprobe_addrs, g_nprobe_pages, g_nuse_sites);
+    report(env, "probes p0=%ld p1=%ld addrs=%d pages=%d sites=%d/%d", pcnt[0],
+           pcnt[1], g_nprobe_addrs, g_nprobe_pages, g_nuse_sites,
+           g_nuse_sites_total);
 }
 
 static int near_use_site(uintptr_t pc, uintptr_t window) {
@@ -497,19 +568,22 @@ typedef struct {
     uint32_t insn;
 } cand_t;
 
-static void push_cand(cand_t* cands, int* n, uintptr_t pc, uint32_t insn) {
+static void push_cand(cand_t* cands, int* n, int* truncated, uintptr_t pc,
+                      uint32_t insn) {
     for (int i = 0; i < *n; i++)
         if (cands[i].pc == pc) return;
     if (*n < MAX_CANDS) {
         cands[*n].pc = pc;
         cands[*n].insn = insn;
         (*n)++;
+    } else {
+        (*truncated)++;
     }
 }
 
 static void collect_structural(const profile_t* pf, uintptr_t rs, uintptr_t re,
-                               cand_t* cands, int* n, long* raw_tbz,
-                               long* raw_tst, long* raw_cbz,
+                               cand_t* cands, int* n, int* truncated,
+                               long* raw_tbz, long* raw_tst, long* raw_cbz,
                                long* gated_out) {
     for (uintptr_t pc = (rs + 3) & ~(uintptr_t)3u; pc + 4 <= re; pc += 4) {
         uint32_t insn = *(volatile uint32_t*)pc;
@@ -553,12 +627,12 @@ static void collect_structural(const profile_t* pf, uintptr_t rs, uintptr_t re,
         uintptr_t tgt = bpc + (uintptr_t)(im * 4);
         if (tgt < rs || tgt >= re) continue;
         if (!region_has_probe(pf, rs, re, pc) &&
-            !near_use_site(pc, (uintptr_t)pf->window * 4)) {
+            !near_use_site(pc, (uintptr_t)pf->xref_win)) {
             (*gated_out)++;
             continue;
         }
 
-        push_cand(cands, n, bpc, binsn);
+        push_cand(cands, n, truncated, bpc, binsn);
     }
 }
 
@@ -581,7 +655,8 @@ static void collect_patterns(const profile_t* pf, uintptr_t rs, uintptr_t re,
             if (bpc + 4 > re) continue;
             uint32_t insn = *(volatile uint32_t*)bpc;
             if (!is_tbz_bit0(insn) && !is_bcond(insn)) continue;
-            push_cand(cands, n, bpc, insn);
+            int dummy_trunc = 0;
+            push_cand(cands, n, &dummy_trunc, bpc, insn);
         }
     }
 }
@@ -610,25 +685,57 @@ static int side_scores_bl_then_b(uintptr_t rs, uintptr_t re, uintptr_t from) {
 
 /* 1 = taken side is autoplay (rewrite branch -> B target),
  * 2 = fall-through side is autoplay (rewrite branch -> NOP).
- * Wrong guesses degrade to "always manual", never crash. */
-static int resolve_auto_side(uintptr_t rs, uintptr_t re, uintptr_t pc,
-                             uint32_t insn) {
+ * Wrong guesses degrade to "always manual", never crash.
+ * Score: 2 = cond-code heuristic (strong), +1 = exclusive [bl..b] shape. */
+typedef struct {
+    int decision;
+    int heuristic; /* 0/2 */
+    int st, sf;    /* [bl..b] shape on taken / fall-through side */
+} side_res_t;
+
+static side_res_t resolve_auto_side_ex(uintptr_t rs, uintptr_t re,
+                                       uintptr_t pc, uint32_t insn) {
+    side_res_t r = {1, 0, 0, 0};
     if (is_tbz_bit0(insn)) {
-        return (insn >> 24) == 0x37 ? 1 : 2; /* tbnz: set => autoplay */
+        r.decision = (insn >> 24) == 0x37 ? 1 : 2;
+        r.heuristic = 2;
+        return r;
     }
     if (is_bcond(insn)) {
         uint32_t cond = insn & 0xFu;
-        if (cond == 1) return 1;             /* b.ne */
-        if (cond == 0) return 2;             /* b.eq */
+        if (cond == 1) {
+            r.decision = 1;
+            r.heuristic = 2;
+            return r;
+        }
+        if (cond == 0) {
+            r.decision = 2;
+            r.heuristic = 2;
+            return r;
+        }
     }
     int32_t im = branch_imm(insn);
     uintptr_t tgt = pc + (uintptr_t)(im * 4);
-    int st = side_scores_bl_then_b(rs, re, tgt);
-    int sf = side_scores_bl_then_b(rs, re, pc + 4);
-    if (st && !sf) return 1;
-    if (sf && !st) return 2;
-    LOGW("polarity unresolved @ %p, assuming taken side", (void*)pc);
-    return 1;
+    r.st = side_scores_bl_then_b(rs, re, tgt);
+    r.sf = side_scores_bl_then_b(rs, re, pc + 4);
+    if (r.st && !r.sf)
+        r.decision = 1;
+    else if (r.sf && !r.st)
+        r.decision = 2;
+    else {
+        LOGW("polarity unresolved @ %p, assuming taken side", (void*)pc);
+        r.decision = 1;
+    }
+    return r;
+}
+
+static int resolve_auto_side(uintptr_t rs, uintptr_t re, uintptr_t pc,
+                             uint32_t insn) {
+    return resolve_auto_side_ex(rs, re, pc, insn).decision;
+}
+
+static int cand_score(const side_res_t* s) {
+    return s->heuristic + ((s->st ^ s->sf) ? 1 : 0);
 }
 
 static int rewrite_branch(uintptr_t rs, uintptr_t re, uintptr_t pc,
@@ -701,22 +808,28 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
                    int verbose) {
     if (re <= rs || re - rs > MAX_SPAN_BYTES) return 0;
 
-    cand_t cands[MAX_CANDS];
-    int n = 0;
-    long raw_tbz = 0, raw_tst = 0, raw_cbz = 0, gated_out = 0;
-    collect_structural(pf, rs, re, cands, &n, &raw_tbz, &raw_tst, &raw_cbz,
-                       &gated_out);
-    collect_patterns(pf, rs, re, cands, &n);
+    /* one-shot scan: the 16MB walk costs ~10s, cache results per span */
+    static cand_t cands[MAX_CANDS];
+    static int n;
+    static long raw_tbz, raw_tst, raw_cbz, gated_out;
+    static int truncated;
+    static uintptr_t cached_rs, cached_re;
+    if (cached_rs != rs || cached_re != re) {
+        n = 0;
+        truncated = 0;
+        collect_structural(pf, rs, re, cands, &n, &truncated, &raw_tbz,
+                           &raw_tst, &raw_cbz, &gated_out);
+        collect_patterns(pf, rs, re, cands, &n);
+        cached_rs = rs;
+        cached_re = re;
+    }
 
-    if (verbose) {
-        long p0 = count_probe(pf, rs, re, pf->probes[0]);
-        long p1 = pf->nprobes > 1 ? count_probe(pf, rs, re, pf->probes[1]) : -1;
+    if (verbose)
         report(env,
                "span %ldMB: raw tbz=%ld tst=%ld cbz=%ld gated=%ld "
-               "probe0=%ld probe1=%ld",
+               "cand=%d%s",
                (long)((re - rs) >> 20), raw_tbz, raw_tst, raw_cbz, gated_out,
-               p0, p1);
-    }
+               n, truncated ? "(truncated)" : "");
 
     if (n == 0) {
         if (verbose) report(env, "scan [%lx,%lx): no candidates", rs, re);
@@ -724,21 +837,58 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
     }
     LOGI("candidates in [%p,%p): %d (max_cand=%d)", (void*)rs, (void*)re, n,
          pf->max_cand);
-    if (verbose) report(env, "scan: %d candidate(s), max_cand=%d", n, pf->max_cand);
 
-    if (n != pf->max_cand) {
-        LOGE("ambiguous (%d != %d) - refusing to patch", n, pf->max_cand);
+    /* detailed candidate dump (up to 8): form, offset, insn, site dist,
+     * branch target, polarity decision and score */
+    int dump = n > 8 ? 8 : n;
+    for (int i = 0; i < dump; i++) {
+        side_res_t sres =
+            resolve_auto_side_ex(rs, re, cands[i].pc, cands[i].insn);
+        int32_t im = branch_imm(cands[i].insn);
+        report(env, "cand%d %s @+%lx %08x d=%ld tgt=+%ld dec=%d h=%d st%d sf%d",
+               i, form_name(cands[i].insn), cands[i].pc - rs, cands[i].insn,
+               dist_to_sites(cands[i].pc), im * 4, sres.decision,
+               sres.heuristic, sres.st, sres.sf);
+    }
+
+    if (n == pf->max_cand) {
+        for (int i = 0; i < n; i++) {
+            int decision =
+                resolve_auto_side(rs, re, cands[i].pc, cands[i].insn);
+            if (rewrite_branch(rs, re, cands[i].pc, cands[i].insn, decision))
+                return 1;
+        }
         return -1;
     }
 
-    for (int i = 0; i < n; i++) {
-        int decision = resolve_auto_side(rs, re, cands[i].pc, cands[i].insn);
-        if (verbose)
-            report(env, "branch @%lx insn=%08x side=%d", cands[i].pc, cands[i].insn,
-                   decision);
-        if (rewrite_branch(rs, re, cands[i].pc, cands[i].insn, decision))
-            return 1;
+    /* ranked best-of-N: only accept a strictly dominant top candidate */
+    if (!pf->best_of_n) {
+        LOGE("ambiguous (%d != %d) - refusing to patch", n, pf->max_cand);
+        report(env, "ambiguous (%d != max_cand), BEST_OF_N off - abort", n);
+        return -1;
     }
+    side_res_t res[MAX_CANDS];
+    int scores[MAX_CANDS];
+    int best = 0, tie = 0;
+    for (int i = 0; i < n; i++) {
+        res[i] = resolve_auto_side_ex(rs, re, cands[i].pc, cands[i].insn);
+        scores[i] = cand_score(&res[i]);
+        if (scores[i] > scores[best]) best = i;
+    }
+    for (int i = 0; i < n && !tie; i++)
+        if (i != best && scores[i] >= scores[best]) tie = 1;
+    LOGI("ranked: best=cand%d score=%d tie=%d", best, scores[best], tie);
+    if (tie || scores[best] < 3) {
+        report(env,
+               "no dominant candidate (%d cands, top score=%d%s) - abort",
+               n, scores[best], tie ? ", tie" : ", weak");
+        return -1;
+    }
+    report(env, "best-of-%d: cand%d (%s @+%lx, score=%d)", n, best,
+           form_name(cands[best].insn), cands[best].pc - rs, scores[best]);
+    if (rewrite_branch(rs, re, cands[best].pc, cands[best].insn,
+                       res[best].decision))
+        return 1;
     return -1;
 }
 
@@ -773,6 +923,14 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
                 int xe = 0;
                 for (int i = 0; i < n; i++) xe += spans[i].exec;
                 report(env, "lib mapped: %d span(s), exec=%d", n, xe);
+            }
+            {
+                /* re-map / layout change => rebuild fingerprint + rescan */
+                static uintptr_t last_base = 0;
+                if (last_base != spans[0].start) {
+                    last_base = spans[0].start;
+                    g_xref_done = 0;
+                }
             }
             if (!g_xref_done) {
                 build_xref(env, spans, n, &pf);
