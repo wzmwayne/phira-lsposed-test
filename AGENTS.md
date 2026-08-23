@@ -122,6 +122,20 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
 - 未解遗留（低优先级）：asset 加载失败根因（疑 MainHook 传 assets 或 AAssetManager_open）
   未深挖，内置兜底已绕过；来源回报日志可供后续排查。
 
+### ★ 上传逻辑影响结论（2026-08-23 用户问询，已定案）
+- **机械层面：上传逻辑不被破坏**。patch 仅改写 judge::update 入口 1 条分支
+  （tbnz→B，4 字节）；上传链路（game.rs Ending 门控、client.rs 网络/token/endpoint）
+  零改动；config.mods 不写 → AUTOPLAY 位=0，无作弊标记。
+- **构建形态**：OSS 构建（自编译 hacked 包）`#[cfg(closed)]` 剔除 encode_record →
+  **本就没有上传路径**，无可破坏；本地 best 照常 save_fn 保存。闭源构建上传机制
+  原样可用。
+- **语义副作用（固有，非 bug）**：auto 体给所有 note 写固定判定值 2（dc94b0 mov w8,#2
+  → dc94b4 strb [x27,#0x30]），成绩按正常计分；因 mods 无 UNRATED/AUTOPLAY，Ending
+  门控全过 → 自动成绩会以**真实成绩形态**保存（OSS 本地 best）/上传（闭源连自建服）。
+  这是方向 1「不改 mods」的固有结果，演示连自建服务端属预期。
+- **设计边界**：patch 对进程是**全有全无**——装上即每次进局都自动打，无按局切换；
+  需要"真玩+上传"时须在 LSPosed 停用模块或换未 patch 安装。
+
 ### 其他环境事实（重要）
 - 用户手机：华为 ROM（API 93），LSPosed；目标包 org.flos.phira.hacked（自编译 hacked 构建）
   与原版 org.flos.phira 二进制特征一致。
