@@ -986,12 +986,12 @@ static int apply_jitter(JNIEnv* env, const profile_t* pf, uintptr_t rs,
     }
 
     /* trampoline (offsets from cave):
-     *  hash(note_id w25 * seed) >> 22 - 512 -> scvtf -> *scale = offset s,
-     *  stash offset in callee-saved d8 (dead at this point), log
-     *  (note, offset_us) via __android_log_print, restore d8, then
-     *  replicate the original add/mov and return to the bl.
-     *  literals: 0x58 scale f64, 0x60 1e6 f64, 0x68 logfn u64;
-     *  strings:  0x70 tag, 0x80 fmt.
+     *  hash(note_id w25 * seed) >> 22 - 512 -> w5(hash) + scvtf -> *scale
+     *  = offset s, stash offset in callee-saved d8 (dead at this point),
+     *  log (note, hash, offset_us) via __android_log_print, restore d8,
+     *  then replicate the original add/mov and return to the bl.
+     *  literals: 0x5C scale f64, 0x64 1e6 f64, 0x6C logfn u64;
+     *  strings:  0x78 tag, 0x88 fmt.
      *  Any seed is scrambled by the Knuth multiplier so that even tiny
      *  user seeds give id*seed high bits that vary with note id. */
     uint32_t seed = jit->seed ? jit->seed : (uint32_t)time(NULL);
@@ -1007,38 +1007,39 @@ static int apply_jitter(JNIEnv* env, const profile_t* pf, uintptr_t rs,
     w[n++] = 0x53000000u | (22u << 16) | (31u << 10) | (9u << 5) |
              9u; /* lsr w9,w9,#22 (imms=31) */
     w[n++] = 0x51000000u | (512u << 10) | (9u << 5) | 9u;         /* sub w9,w9,#512 */
-    w[n++] = 0x5E61D800u | (9u << 5);                             /* scvtf d0,w9 */
-    w[n++] = 0x5C000001u | (16u << 5);  /* ldr d1,[pc,#64] scale@0x58 */
+    w[n++] = 0x2A0903E5u;               /* mov w5,w9 (save hash) */
+    w[n++] = 0x5E61D800u | (9u << 5);   /* scvtf d0,w9 */
+    w[n++] = 0x5C000001u | (16u << 5);  /* ldr d1,[pc,#64] scale@0x5C */
     w[n++] = 0x1E610800u | (1u << 16);  /* fmul d0,d0,d1 -> offset seconds */
     w[n++] = 0x1E604008u;               /* fmov d8,d0 (stash, callee-saved) */
-    w[n++] = 0x5C000001u | (15u << 5);  /* ldr d1,[pc,#60] 1e6@0x60 */
+    w[n++] = 0x5C000001u | (15u << 5);  /* ldr d1,[pc,#60] 1e6@0x64 */
     w[n++] = 0x1E610800u | (1u << 16);  /* fmul d0,d0,d1 -> offset us */
     w[n++] = 0x1E780004u;               /* fcvtzs w4,d0 (int us) */
     w[n++] = 0x2A1903E3u;               /* mov w3,w25 (note id) */
     w[n++] = 0xD2800080u;               /* mov x0,#4 (ANDROID_LOG_INFO) */
-    w[n++] = 0x100001C1u;               /* adr x1,tag@0x70 */
-    w[n++] = 0x10000222u;               /* adr x2,fmt@0x80 */
-    w[n++] = 0x58000149u;               /* ldr x9,[pc,#40] logfn@0x68 */
+    w[n++] = 0x100001E1u;               /* adr x1,tag@0x78 (imm21=15) */
+    w[n++] = 0x10000242u;               /* adr x2,fmt@0x88 (imm21=18) */
+    w[n++] = 0x58000149u;               /* ldr x9,[pc,#40] logfn@0x6C */
     w[n++] = 0xD63F0120u;               /* blr x9 (__android_log_print) */
     w[n++] = 0x1E604100u;               /* fmov d0,d8 (restore offset s) */
     w[n++] = 0x910162C0u;               /* add x0,x22,#0x58 */
     w[n++] = 0x2A1F03E1u;               /* mov w1,wzr */
-    w[n++] = b_insn(cave + 0x54u, pc + 0x0Cu); /* b back to the bl */
-    /* n == 22 instructions -> literals at 0x58 */
+    w[n++] = b_insn(cave + 0x58u, pc + 0x0Cu); /* b back to the bl */
+    /* n == 23 instructions -> literals at 0x5C */
     double scale =
         (jit->sigma_ms / 1000.0) * 1.7320508075688772 / 512.0; /* R/512 */
     double e6 = 1.0e6;
     uintptr_t logfn = (uintptr_t)&__android_log_print;
-    memcpy(img + 0x58, &scale, 8);
-    memcpy(img + 0x60, &e6, 8);
-    memcpy(img + 0x68, &logfn, 8);
-    strcpy((char*)img + 0x70, "PhiraAgent");
-    strcpy((char*)img + 0x80, "jitter-note: note=%d off_us=%d");
-    size_t img_len = 0x80u + sizeof("jitter-note: note=%d off_us=%d");
+    memcpy(img + 0x5C, &scale, 8);
+    memcpy(img + 0x64, &e6, 8);
+    memcpy(img + 0x6C, &logfn, 8);
+    strcpy((char*)img + 0x78, "PhiraAgent");
+    strcpy((char*)img + 0x88, "jitter-note: note=%d hash=%d off_us=%d");
+    size_t img_len = 0x88u + sizeof("jitter-note: note=%d hash=%d off_us=%d");
 
     uint32_t b = b_insn(pc, cave);
     int64_t d1 = (int64_t)cave - (int64_t)pc;
-    int64_t d2 = (int64_t)(pc + 0x0Cu) - (int64_t)(cave + 0x54u);
+    int64_t d2 = (int64_t)(pc + 0x0Cu) - (int64_t)(cave + 0x58u);
     if ((d1 & 3) || (d2 & 3) || d1 > 0x7FFFFFFLL || d1 < -0x8000000LL ||
         d2 > 0x7FFFFFFLL || d2 < -0x8000000LL) {
         report(env, "JITTER: branch out of range - abort");
@@ -1053,6 +1054,11 @@ static int apply_jitter(JNIEnv* env, const profile_t* pf, uintptr_t rs,
         status(env, "写入失败");
         return -1;
     }
+    /* read back the cave image for byte-level confirmation */
+    LOGI("jitter cave: %08x %08x %08x %08x %08x %08x %08x %08x",
+         ((uint32_t*)cave)[0], ((uint32_t*)cave)[1], ((uint32_t*)cave)[2],
+         ((uint32_t*)cave)[3], ((uint32_t*)cave)[4], ((uint32_t*)cave)[5],
+         ((uint32_t*)cave)[6], ((uint32_t*)cave)[7]);
     if (!patch_word(pc, b)) {
         LOGE("jitter: branch patch failed - abort");
         report(env, "JITTER: branch patch failed - abort");
