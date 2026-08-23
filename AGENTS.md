@@ -35,8 +35,8 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
 ### 仓库与 CI
 - https://github.com/wzmwayne/phira-lsposed-test ，main 分支，嵌套独立 git 仓库于
   `/home/wayne/date/phira/lsposed-autoplay/`。
-- 当前 HEAD = **v0.7.1 (versionCode 10)**（PATCH_AT 内置兜底 + 三路来源回报），CI 成功
-  （1m23s），artifact 名 phira-lsposed-test-debug。
+- 当前 HEAD = **v0.7.2 (versionCode 11)**（JITTER 抖动注入，代码完成待 CI/装机验证），
+  CI 成功（1m23s），artifact 名 phira-lsposed-test-debug。
 - CI：setup-java 17 + gradle 8.7 + setup-gradle@v4 缓存 + ndkVersion 钉 26.3.11579264。
 - 关键历史 commits：8e7dbac(stub 外移 :stub compileOnly)、d55451f(面板直报)、2430eb4(cbz 形态)、
   e640240/38a9f1d(xref 门控)、dd7c5ca(v0.5.1 精确偏移 xref+缓存+排名)、147df09(v0.6.0 imm14 修复)。
@@ -127,6 +127,22 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
   防止注入手法被他人利用；后续 push 走私有 Actions（免费额度内）。
 - 未解遗留（低优先级）：asset 加载失败根因（疑 MainHook 传 assets 或 AAssetManager_open）
   未深挖，内置兜底已绕过；来源回报日志可供后续排查。
+
+### v0.7.2（JITTER 抖动注入，代码完成待 CI/装机验证）【进行中】
+- 目标：让注入局在本地闭源服务端被接受（std≈0 拒收 → std≈20ms 人类画像）。
+- 机制：auto commit diff 槽 `0xdc96f8: movi d0,#0.0`（span+0x6D96F8，expect 0x2F00E400）
+  → patch 成 `b <cave>`；cave 位于 exec 段空闲区 span+0x1009028（280B NOP/零填充，
+  由 find_cave 运行时扫描，不写死）→ 跳板 11 条指令 + 8B f64 字面量：
+  哈希(note_id w25 × seed)>>22 −512 → scvtf → ×scale(R/512, R=σ√3) → 复刻原
+  add x0,x22,#0x58 / mov w1,wzr → b 回 0xdc9704（bl commit）。
+- 效果：commit 的 sumsq(x19+248) 累加 d0² → std=√(sumsq/count)≈σ；判定仍全 Perfect、
+  mods 不动、计分不变；seed 每局随机（时间）且经 Knuth 混淆防退化（小 seed 修复）。
+- profile 新指令：`JITTER <off> <expect> [σ_ms] [seed]`（σ 0=禁用，默认 20，
+  clamp 5~40 → R=σ√3<80ms）；内置默认已含 `JITTER 6d96f8 2f00e400 20`；
+  面板回报 `JITTER: cave @ +0x..` / `JITTER: std~=..ms seed=.. cave=+0x..`。
+- 编码验证：capstone 逐条核对 11 指令 + 两个分支目标（修过 2 个 bug：lsr imms=31、
+  b_insn 先截断后移位的符号错）；分布仿真 std=20.0±0.05ms、均值≈0、窗口内 100%。
+- versionCode 11 / versionName 0.7.2；JITTER 失败仅报告不影响 PATCH_AT（fail-safe）。
 
 ### ★ 上传逻辑影响结论（2026-08-23 用户问询，已定案）
 - **机械层面：上传逻辑不被破坏**。patch 仅改写 judge::update 入口 1 条分支

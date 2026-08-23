@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #define TAG "PhiraAgent"
@@ -60,6 +61,7 @@
 static const char* g_lib_name = DEFAULT_LIB_NAME;
 
 static void report(JNIEnv* env, const char* fmt, ...); /* fwd: defined later */
+static void status(JNIEnv* env, const char* fmt, ...);  /* fwd: defined later */
 
 typedef struct {
     unsigned char bytes[MAX_PAT_BYTES];
@@ -74,6 +76,19 @@ typedef struct {
     uint32_t repl;   /* replacement word, 0 = derive from expect (tbnz->B) */
 } patch_at_t;
 
+/* auto-play timing-offset jitter: the auto commit passes diff=0.0 for every
+ * note, so the std (无暇度) aggregate stays 0 and the server rejects the
+ * record as non-human. JITTER patches the auto commit's diff slot to feed a
+ * per-note pseudo-random offset in [-R,+R] (R = sigma*sqrt(3)) so the
+ * game's own sumsq accumulator yields std ~= sigma. */
+typedef struct {
+    long off;        /* span-relative offset of the movi d0,#0.0 slot */
+    uint32_t expect; /* required current word (e.g. 0x2F00E400 movi d0,#0) */
+    int sigma_ms;    /* target std in ms, 0 = disabled */
+    uint32_t seed;   /* hash seed, 0 = random at patch time */
+    int enabled;
+} jitter_t;
+
 typedef struct {
     uint64_t probes[MAX_PROBES];
     int nprobes;
@@ -85,6 +100,7 @@ typedef struct {
     int npats;
     patch_at_t patch_ats[MAX_PATCH_ATS];
     int npatch_ats;
+    jitter_t jit;
 } profile_t;
 
 static int hexval(char c) {
@@ -110,6 +126,16 @@ static void profile_defaults(profile_t* pf) {
     pf->patch_ats[pf->npatch_ats].expect = 0x37000548u;
     pf->patch_ats[pf->npatch_ats].repl = 0u; /* derive: tbnz -> B same target */
     pf->npatch_ats++;
+    /* built-in jitter insurance: same build (Phira_0.8.2) auto commit diff
+     * slot at vaddr 0xdc96f8 = span+0x6D96F8, `movi d0,#0.0`. Patch it to a
+     * trampoline that feeds per-note pseudo-random offsets so std ~= 20ms
+     * (human-plausible) instead of 0. Update with the build (see
+     * docs/judge-error-std-manual-analysis.md). */
+    pf->jit.off = 0x6D96F8L;
+    pf->jit.expect = 0x2F00E400u; /* movi d0, #0.0 */
+    pf->jit.sigma_ms = 20;
+    pf->jit.seed = 0; /* random per launch */
+    pf->jit.enabled = 1;
 }
 
 static void profile_parse(profile_t* pf, char* buf);
@@ -166,6 +192,28 @@ static void profile_line(profile_t* pf, char* s) {
         pa->expect = (uint32_t)expect;
         pa->repl = (uint32_t)repl; /* 0 => derive */
         pf->npatch_ats++;
+    } else if (!strcmp(cmd, "JITTER")) {
+        if (pf->jit.enabled) {
+            LOGW("JITTER duplicate (already set) - keep first");
+            return;
+        }
+        unsigned long off;
+        unsigned int expect;
+        int sigma = 20;
+        unsigned int seed = 0;
+        int got = sscanf(rest, "%lx %x %d %x", &off, &expect, &sigma, &seed);
+        if (got < 2) {
+            LOGE("JITTER: need <hex_off> <hex_expect> [sigma_ms] [seed]");
+            return;
+        }
+        if (off & 3u) return;
+        if (sigma < 0) sigma = 0;
+        if (sigma > 40) sigma = 40; /* R=sigma*sqrt(3) must stay < 80ms window */
+        pf->jit.off = (long)off;
+        pf->jit.expect = (uint32_t)expect;
+        pf->jit.sigma_ms = sigma;
+        pf->jit.seed = seed;
+        pf->jit.enabled = 1;
     } else if (!strcmp(cmd, "PROBE")) {
         char hex[32];
         if (pf->nprobes >= MAX_PROBES) return;
@@ -829,6 +877,159 @@ static int patch_word(uintptr_t pc, uint32_t nw) {
     return 1;
 }
 
+/* same dance for an arbitrary byte buffer (up to two pages) */
+static int patch_bytes(uintptr_t addr, const void* buf, size_t len) {
+    uintptr_t pg0 = addr & ~(uintptr_t)0xFFFu;
+    uintptr_t pg1 = (addr + len - 1) & ~(uintptr_t)0xFFFu;
+    if (mprotect((void*)pg0, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        LOGE("mprotect RW failed: %s", strerror(errno));
+        return 0;
+    }
+    if (pg1 != pg0 &&
+        mprotect((void*)pg1, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        LOGE("mprotect RW(pg1) failed: %s", strerror(errno));
+        mprotect((void*)pg0, 0x1000, PROT_READ | PROT_EXEC);
+        return 0;
+    }
+    memcpy((void*)addr, buf, len);
+    __builtin___clear_cache((char*)addr, (char*)addr + (long)len);
+    mprotect((void*)pg0, 0x1000, PROT_READ | PROT_EXEC);
+    if (pg1 != pg0) mprotect((void*)pg1, 0x1000, PROT_READ | PROT_EXEC);
+    if (memcmp((void*)addr, buf, len) != 0) {
+        LOGE("verify failed @ %p", (void*)addr);
+        return 0;
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* jitter: make the auto path feed plausible timing offsets             */
+/*                                                                     */
+/* auto_play_update commits every note as Perfect with diff=0.0, so     */
+/* the std (无暇度) aggregate stays 0 and servers reject the record as  */
+/* non-human. JITTER redirects the diff slot (movi d0,#0.0) to a       */
+/* trampoline in a free code cave that computes a per-note              */
+/* pseudo-random offset (hash of note id + seed) in [-R,+R] with        */
+/* R = sigma*sqrt(3), i.e. std ~= sigma. judged states / mods / score   */
+/* are untouched.                                                       */
+/* ------------------------------------------------------------------ */
+
+/* aarch64 unconditional branch (signed 64-bit offset, then low 26 bits) */
+static uint32_t b_insn(uintptr_t from, uintptr_t to) {
+    int64_t off = (int64_t)to - (int64_t)from;
+    return 0x14000000u | ((uint32_t)(off >> 2) & 0x03FFFFFFu);
+}
+
+/* first aligned run of >= need bytes of NOP/zero padding in [rs,re) */
+static uintptr_t find_cave(uintptr_t rs, uintptr_t re, size_t need) {
+    uintptr_t run_start = 0;
+    size_t run = 0;
+    for (uintptr_t p = (rs + 3) & ~(uintptr_t)3u; p + 4 <= re; p += 4) {
+        uint32_t w = *(volatile uint32_t*)p;
+        if (w == 0xD503201Fu || w == 0u) { /* NOP or zero padding */
+            if (run == 0) run_start = p;
+            run++;
+            if (run * 4 >= need) return run_start;
+        } else {
+            run = 0;
+        }
+    }
+    return 0;
+}
+
+/* patch the auto-commit diff slot to route through a jitter trampoline.
+ * Returns 1 patched, 0 nothing to do, -1 fail-safe abort. */
+static int apply_jitter(JNIEnv* env, const profile_t* pf, uintptr_t rs,
+                        uintptr_t re) {
+    const jitter_t* jit = &pf->jit;
+    if (!jit->enabled || jit->sigma_ms <= 0) return 0;
+
+    uintptr_t pc = rs + (uintptr_t)jit->off;
+    if (pc < rs || pc + 4 > re) {
+        report(env, "JITTER @+%lx out of span - abort", jit->off);
+        status(env, "越界放弃");
+        return -1;
+    }
+    uint32_t cur = *(volatile uint32_t*)pc;
+    if (cur != jit->expect) {
+        report(env, "JITTER @+%lx: %08x != expect %08x - abort", jit->off, cur,
+               jit->expect);
+        status(env, "校验不符");
+        return -1;
+    }
+
+    /* locate the trampoline cave once per span */
+    static uintptr_t cave_rs = 0, cave_re = 0, cave = 0;
+    if (cave_rs != rs || cave_re != re) {
+        cave = find_cave(rs, re, 64);
+        cave_rs = rs;
+        cave_re = re;
+        if (cave) report(env, "JITTER: cave @ +0x%lx", cave - rs);
+    }
+    if (!cave) {
+        report(env, "JITTER: no code cave found - abort");
+        status(env, "写入失败");
+        return -1;
+    }
+    if (cave + 64 > re) {
+        report(env, "JITTER: cave out of span - abort");
+        status(env, "越界放弃");
+        return -1;
+    }
+
+    /* trampoline: hash(note_id w25) -> uniform [-512,512) -> scale to
+     * [-R,+R]; then replicate the original add/mov and return to the bl.
+     * Any seed is scrambled by the Knuth multiplier so that even tiny
+     * user seeds give id*seed high bits that vary with note id. */
+    uint32_t seed = jit->seed ? jit->seed : (uint32_t)time(NULL);
+    seed = seed * 0x9E3779B1u + 0x9E3779B1u;
+    seed |= 1u; /* keep the multiplier odd for hash quality */
+    uint32_t w[13];
+    int n = 0;
+    w[n++] = 0x52800000u | ((seed & 0xFFFFu) << 5) | 9u;         /* movz w9,#lo */
+    w[n++] = 0x72A00000u | (((seed >> 16) & 0xFFFFu) << 5) | 9u; /* movk w9,#hi */
+    w[n++] = 0x1B007C00u | (9u << 16) | (25u << 5) | 9u;         /* mul w9,w25,w9 */
+    w[n++] = 0x53000000u | (22u << 16) | (31u << 10) | (9u << 5) |
+             9u; /* lsr w9,w9,#22 (imms=31) */
+    w[n++] = 0x51000000u | (512u << 10) | (9u << 5) | 9u;        /* sub w9,w9,#512 */
+    w[n++] = 0x5E61D800u | (9u << 5);                            /* scvtf d0,w9 */
+    w[n++] = 0x5C000001u | (5u << 5);  /* ldr d1,[pc,#20] -> literal at +0x2C */
+    w[n++] = 0x1E610800u | (1u << 16); /* fmul d0,d0,d1 */
+    w[n++] = 0x910162C0u;              /* add x0,x22,#0x58 */
+    w[n++] = 0x2A1F03E1u;              /* mov w1,wzr */
+    w[n++] = b_insn(cave + 0x28u, pc + 0x0Cu); /* b back to the bl */
+    double scale =
+        (jit->sigma_ms / 1000.0) * 1.7320508075688772 / 512.0; /* R/512 */
+    memcpy(&w[n], &scale, 8);
+    n += 2; /* f64 literal */
+
+    uint32_t b = b_insn(pc, cave);
+    int64_t d1 = (int64_t)cave - (int64_t)pc;
+    int64_t d2 = (int64_t)(pc + 0x0Cu) - (int64_t)(cave + 0x28u);
+    if ((d1 & 3) || (d2 & 3) || d1 > 0x7FFFFFFLL || d1 < -0x8000000LL ||
+        d2 > 0x7FFFFFFLL || d2 < -0x8000000LL) {
+        report(env, "JITTER: branch out of range - abort");
+        status(env, "越界放弃");
+        return -1;
+    }
+
+    status(env, "校验注入点");
+    if (!patch_bytes(cave, w, (size_t)n * 4)) {
+        report(env, "JITTER: trampoline write failed - abort");
+        status(env, "写入失败");
+        return -1;
+    }
+    if (!patch_word(pc, b)) {
+        report(env, "JITTER: branch patch failed - abort");
+        status(env, "写入失败");
+        return -1;
+    }
+    report(env, "JITTER: std~=%dms seed=%08x cave=+0x%lx", jit->sigma_ms, seed,
+           cave - rs);
+    status(env, "抖动注入");
+    return 1;
+}
+
 /* bonus by distance from enclosing function entry (proxy: last `ret`,
  * prologue marker must follow within 6 insns). The autoplay check lives
  * in the first few hundred bytes of judge::update - noise candidates
@@ -976,8 +1177,17 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
         }
         report(env, "PATCH_AT: %d site(s) patched", pf->npatch_ats);
         status(env, "注入成功");
+        /* optional jitter: never fatal if it fails - the branch patch alone
+         * is the core injection, jitter only makes the record plausible. */
+        if (pf->jit.enabled) {
+            int jr = apply_jitter(env, pf, rs, re);
+            if (jr < 0) report(env, "JITTER skipped (fail-safe, PATCH_AT ok)");
+        }
         return 1;
     }
+
+    /* no PATCH_AT entries: jitter alone is pointless without the branch
+     * patch (auto never runs), so fall through to the scan path. */
 
     /* one-shot scan: the 16MB walk costs ~10s, cache results per span */
     static cand_t cands[MAX_CANDS];
@@ -1102,9 +1312,11 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
     profile_load(&pf, env, assets);
     LOGI("agent up: lib=%s window=%ld probes=%d patterns=%d max_cand=%d",
          g_lib_name, pf.window, pf.nprobes, pf.npats, pf.max_cand);
-    report(env, "profile: lib=%s win=%ld probes=%d pats=%d max=%d ats=%d",
+    report(env,
+           "profile: lib=%s win=%ld probes=%d pats=%d max=%d ats=%d jit=%s",
            g_lib_name, pf.window, pf.nprobes, pf.npats, pf.max_cand,
-           pf.npatch_ats);
+           pf.npatch_ats,
+           pf.jit.enabled ? "on" : "off");
     status(env, "自检");
 
     long waited = 0;

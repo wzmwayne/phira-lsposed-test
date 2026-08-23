@@ -21,6 +21,14 @@
 #           omit replacement to derive tbnz -> unconditional B to same target.
 #           Current build (Phira_0.8.2): judge::update entry ~0xdc9288,
 #           branch at vaddr 0xdc92d0 = span+0x6D92D0, see docs/re-judge-update.md
+# JITTER   <hex span offset> <hex expect insn> [sigma_ms] [seed] - auto-play
+#           timing-offset jitter (v0.7.2). Patches the auto commit diff slot
+#           (movi d0,#0.0, vaddr 0xdc96f8 = span+0x6D96F8) to route through a
+#           code-cave trampoline feeding per-note pseudo-random offsets in
+#           [-R,+R], R = sigma_ms*sqrt(3) ms, so std (无暇度) ~= sigma_ms
+#           instead of 0 (record accepted as human-plausible). sigma 0 =
+#           disabled; seed 0 = random per launch. See
+#           docs/judge-error-std-manual-analysis.md
 
 WINDOW 4096
 MAX_CAND 1
@@ -33,3 +41,4 @@ PROBE 3FB47AE147AE147B
 PROBE 3FC47AE147AE147B
 
 PATCH_AT 6d92d0 37000548
+JITTER 6d96f8 2f00e400 20
