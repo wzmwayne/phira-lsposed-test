@@ -942,16 +942,21 @@ static uintptr_t find_cave(uintptr_t rs, uintptr_t re, size_t need) {
 static int apply_jitter(JNIEnv* env, const profile_t* pf, uintptr_t rs,
                         uintptr_t re) {
     const jitter_t* jit = &pf->jit;
+    LOGI("jitter: enabled=%d sigma=%dms off=+0x%lx expect=%08x", jit->enabled,
+         jit->sigma_ms, jit->off, jit->expect);
     if (!jit->enabled || jit->sigma_ms <= 0) return 0;
 
     uintptr_t pc = rs + (uintptr_t)jit->off;
     if (pc < rs || pc + 4 > re) {
+        LOGE("jitter @+%lx out of span - abort", jit->off);
         report(env, "JITTER @+%lx out of span - abort", jit->off);
         status(env, "越界放弃");
         return -1;
     }
     uint32_t cur = *(volatile uint32_t*)pc;
     if (cur != jit->expect) {
+        LOGE("jitter @+%lx: %08x != expect %08x - abort", jit->off, cur,
+             jit->expect);
         report(env, "JITTER @+%lx: %08x != expect %08x - abort", jit->off, cur,
                jit->expect);
         status(env, "校验不符");
@@ -964,9 +969,11 @@ static int apply_jitter(JNIEnv* env, const profile_t* pf, uintptr_t rs,
         cave = find_cave(rs, re, 64);
         cave_rs = rs;
         cave_re = re;
+        LOGI("jitter: cave @ +0x%lx", cave ? cave - rs : 0);
         if (cave) report(env, "JITTER: cave @ +0x%lx", cave - rs);
     }
     if (!cave) {
+        LOGE("jitter: no code cave found - abort");
         report(env, "JITTER: no code cave found - abort");
         status(env, "写入失败");
         return -1;
@@ -1015,15 +1022,19 @@ static int apply_jitter(JNIEnv* env, const profile_t* pf, uintptr_t rs,
 
     status(env, "校验注入点");
     if (!patch_bytes(cave, w, (size_t)n * 4)) {
+        LOGE("jitter: trampoline write failed - abort");
         report(env, "JITTER: trampoline write failed - abort");
         status(env, "写入失败");
         return -1;
     }
     if (!patch_word(pc, b)) {
+        LOGE("jitter: branch patch failed - abort");
         report(env, "JITTER: branch patch failed - abort");
         status(env, "写入失败");
         return -1;
     }
+    LOGI("jitter: std~=%dms seed=%08x cave=+0x%lx patched", jit->sigma_ms,
+         seed, cave - rs);
     report(env, "JITTER: std~=%dms seed=%08x cave=+0x%lx", jit->sigma_ms, seed,
            cave - rs);
     status(env, "抖动注入");
@@ -1181,7 +1192,12 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
          * is the core injection, jitter only makes the record plausible. */
         if (pf->jit.enabled) {
             int jr = apply_jitter(env, pf, rs, re);
-            if (jr < 0) report(env, "JITTER skipped (fail-safe, PATCH_AT ok)");
+            if (jr < 0) {
+                LOGW("jitter skipped (fail-safe, PATCH_AT ok)");
+                report(env, "JITTER skipped (fail-safe, PATCH_AT ok)");
+            } else if (jr == 0) {
+                LOGI("jitter disabled (sigma=0)");
+            }
         }
         return 1;
     }
