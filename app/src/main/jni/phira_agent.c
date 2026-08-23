@@ -38,7 +38,7 @@
 
 #define DEFAULT_LIB_NAME "libphira.so"
 #define PROFILE_ASSET    "phira_profile.txt"
-#define PROFILE_OVERRIDE "/data/local/tmp/phira_autoplay_profile.txt"
+#define PROFILE_OVERRIDE "/sdcard/Documents/phira_autoplay_profile.txt"
 #define POLL_MS          200
 #define TIMEOUT_MS       120000
 #define LIB_POLLS_BEFORE_FAIL 10
@@ -102,6 +102,14 @@ static void profile_defaults(profile_t* pf) {
     pf->xref_win = 8192; /* real branch sits 4776B from nearest const site */
     pf->max_cand = 1;
     pf->best_of_n = 1;
+    /* built-in insurance: current build (Phira_0.8.2) judge::update branch at
+     * vaddr 0xdc92d0 = span+0x6D92D0, tbnz w8,#0 -> B +0xa8 (0x1400002A).
+     * Guarantees injection even when the APK asset fails to load. Update this
+     * when targeting a different libphira.so build (see docs/re-judge-update.md). */
+    pf->patch_ats[pf->npatch_ats].off = 0x6D92D0L;
+    pf->patch_ats[pf->npatch_ats].expect = 0x37000548u;
+    pf->patch_ats[pf->npatch_ats].repl = 0u; /* derive: tbnz -> B same target */
+    pf->npatch_ats++;
 }
 
 static void profile_parse(profile_t* pf, char* buf);
@@ -145,6 +153,15 @@ static void profile_line(profile_t* pf, char* s) {
             return;
         }
         if (off & 3u) return;
+        /* dedupe by offset: built-in defaults already carry the current
+         * build's entry, and a duplicate would fail its post-write verify
+         * (word no longer equals expect) and abort the whole attempt. */
+        for (int i = 0; i < pf->npatch_ats; i++) {
+            if (pf->patch_ats[i].off == (long)off) {
+                LOGW("PATCH_AT @+%lx duplicate (already set) - skipped", off);
+                return;
+            }
+        }
         pa->off = (long)off;
         pa->expect = (uint32_t)expect;
         pa->repl = (uint32_t)repl; /* 0 => derive */
@@ -224,8 +241,13 @@ static void profile_load(profile_t* pf, JNIEnv* env, jobject assets) {
         buf[n] = 0;
         profile_parse(pf, buf);
         LOGI("profile: override %s", PROFILE_OVERRIDE);
+        report(env, "profile: source=override %s", PROFILE_OVERRIDE);
         return;
     }
+    LOGW("profile: override %s not readable (%s)", PROFILE_OVERRIDE,
+         strerror(errno));
+    report(env, "profile: override %s not readable (%s)", PROFILE_OVERRIDE,
+           strerror(errno));
 
     if (env && assets) {
         AAssetManager* mgr = AAssetManager_fromJava(env, assets);
@@ -242,14 +264,33 @@ static void profile_load(profile_t* pf, JNIEnv* env, jobject assets) {
                         free(buf);
                         AAsset_close(a);
                         LOGI("profile: asset %s", PROFILE_ASSET);
+                        report(env, "profile: source=asset %s", PROFILE_ASSET);
                         return;
                     }
+                    LOGE("profile: asset %s malloc failed", PROFILE_ASSET);
+                    report(env, "profile: asset %s malloc failed", PROFILE_ASSET);
+                } else {
+                    LOGE("profile: asset %s bad length %lld", PROFILE_ASSET,
+                         (long long)len);
+                    report(env, "profile: asset %s bad length %lld",
+                           PROFILE_ASSET, (long long)len);
                 }
                 AAsset_close(a);
+            } else {
+                LOGE("profile: AAssetManager_open(%s) failed", PROFILE_ASSET);
+                report(env, "profile: AAssetManager_open(%s) failed",
+                       PROFILE_ASSET);
             }
+        } else {
+            LOGE("profile: AAssetManager_fromJava failed");
+            report(env, "profile: AAssetManager_fromJava failed");
         }
+    } else {
+        report(env, "profile: no assets handle (env=%p assets=%p)",
+               (void*)env, (void*)assets);
     }
     LOGI("profile: built-in defaults");
+    report(env, "profile: source=builtin");
 }
 
 /* ------------------------------------------------------------------ */

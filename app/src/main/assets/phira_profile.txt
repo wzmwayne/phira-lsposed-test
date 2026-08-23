@@ -1,7 +1,11 @@
 # PhiraAgent location profile (v0.7 defaults)
 # Adapt to future libphira.so builds WITHOUT touching C code:
 #   1) edit this file and rebuild in CI, or
-#   2) push an edited copy to /data/local/tmp/phira_autoplay_profile.txt (live override)
+#   2) push an edited copy to /sdcard/Documents/phira_autoplay_profile.txt (live override)
+#
+# NOTE: the PATCH_AT entry below is ALSO baked into the C built-in defaults
+# (profile_defaults), so injection works even if this asset never loads.
+# Keep the two in sync when retargeting a new build.
 #
 # WINDOW    +/- byte range searched for PROBE fingerprints around a candidate branch
 # XREF_WIN  max distance (bytes) from an adrp+ldr constant use site for a

@@ -17,8 +17,9 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
   2. 结构扫描兜底：tbz/tbnz bit0 / tst+b.cond 形态 + adrp/ldr 常量引用点门控
      （XREF_WIN 默认 8192）+ 评分选择。**注意：对本构建无效**——真分支距最近
      常量引用点 ~70KB（judge::update 巨大），任何合理 XREF_WIN 都够不到；
-  3. profile 热更优先级（**用户指示要改**）：旧 `/data/local/tmp/phira_autoplay_profile.txt`
-     **废弃** → 新位置 `/sdcard/Documents/phira_autoplay_profile.txt` > APK asset > 内置默认；
+  3. profile 热更优先级：`/sdcard/Documents/phira_autoplay_profile.txt`（v0.7.1 起，
+     旧 `/data/local/tmp/phira_autoplay_profile.txt` 已废弃删除） > APK asset > 内置默认；
+     内置默认（profile_defaults）已含当前构建 PATCH_AT 兜底，asset 加载失败也能注入；
   4. Fail-safe 哲学不变：歧义绝不写入。
 - **合规边界（与用户确认过）**：仅自编译测试构建 + 本地/自建服务端；OSS 构建
   rated=false 无 encode_record（cfg(closed)），无上传路径；不得指向官方服务器。
@@ -28,8 +29,8 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
 ### 仓库与 CI
 - https://github.com/wzmwayne/phira-lsposed-test ，main 分支，嵌套独立 git 仓库于
   `/home/wayne/date/phira/lsposed-autoplay/`。
-- 当前 HEAD = **7e178d7 (v0.7.0, versionCode 9)**，CI 成功（1m23s），artifact 名
-  phira-lsposed-test-debug。
+- 当前 HEAD = **v0.7.1 (versionCode 10)**（PATCH_AT 内置兜底 + 三路来源回报），CI 成功
+  （1m23s），artifact 名 phira-lsposed-test-debug。
 - CI：setup-java 17 + gradle 8.7 + setup-gradle@v4 缓存 + ndkVersion 钉 26.3.11579264。
 - 关键历史 commits：8e7dbac(stub 外移 :stub compileOnly)、d55451f(面板直报)、2430eb4(cbz 形态)、
   e640240/38a9f1d(xref 门控)、dd7c5ca(v0.5.1 精确偏移 xref+缓存+排名)、147df09(v0.6.0 imm14 修复)。
@@ -99,23 +100,26 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
   上传门控 game.rs:949-957：**#[cfg(closed)] 整段 OSS 构建剔除** +
   offline_mode/UNRATED/use_keyboard/speed≥1.0 检查；本地 best 走 save_fn+SimpleRecord。
 
-### v0.7.0 实测与未解 bug【下一步首要任务】
-- 面板日志：`profile: lib=libphira.so win=4096 probes=2 pats=0 max=1 ats=0` →
-  **ats=0，PATCH_AT 未生效**，后续按扫描路径走：XREF_WIN=8192 下 cand=71，
-  top score=3 tied=26 → abort(-3)。目标 span+0x6d92d0 不在候选中（距引用点~70KB，预期内）。
-- 排除项：①设备上不存在 /data/local/tmp/phira_autoplay_profile.txt（proot 里该目录都不可见）；
-  ②git show HEAD 验证 asset 第31行确有 `PATCH_AT 6d92d0 37000548`、解析器 line137 存在、
-  sscanf("%lx %x %x") 对该行应 got=2 通过；
-  ③日志所有值(win=4096/max=1/probes=2/pats=0/ats=0)恰等于内置默认 → **疑似 asset 根本没被
-  加载**（MainHook:52 传的是 app.getAssets()，看似正确；或 AAssetManager_open 失败未打日志）。
-- 待办清单（v0.7.1）：
-  1. PROFILE_OVERRIDE 改为 `/sdcard/Documents/phira_autoplay_profile.txt`，删除旧路径支持
-     （用户明确指示）；
-  2. profile_load 三路来源显式回报到面板（override/asset/builtin 字样），asset 打开失败打原因；
-  3. 兜底保险：把 PATCH_AT 6d92d0 37000548 也写进 profile_defaults()（C 内置默认），
-     保证任何情况下当前构建可用；asset 解析问题可后续慢慢查；
-  4. versionCode 10 / versionName 0.7.1 → commit push CI → 用户装新 APK 验证：
-     预期面板出现「校验注入点」→「注入成功」、arm status=1，进局自动打且无 AUTOPLAY 字样。
+### v0.7.1（代码完成，CI/装机验证待跑）【下一步】
+- 背景（v0.7.0 实测）：面板日志 `ats=0` → PATCH_AT 未生效，扫描路径 cand=71 全 tie
+  → abort(-3)；日志值恰等于内置默认 → 疑似 asset 根本没被加载。目标 span+0x6d92d0
+  不在候选中（距引用点~70KB，预期内，扫描路线对本构建本就无效）。
+- v0.7.1 已完成的修复（当前工作区）：
+  1. PROFILE_OVERRIDE → `/sdcard/Documents/phira_autoplay_profile.txt`，旧
+     `/data/local/tmp` 路径删除（用户明确指示）；
+  2. profile_load 三路来源显式回报面板：`source=override/asset/builtin`；
+     override fopen 失败带 strerror；AAssetManager_fromJava/AAssetManager_open/
+     malloc/bad length 各打原因（含 LOGE）——为 asset 加载失败根因留证据；
+  3. profile_defaults() 内置 PATCH_AT 6d92d0 37000548（repl=0 → derive 0x1400002a），
+     任何情况下（asset 加载失败）都能注入；
+  4. ★PATCH_AT 按 offset 去重（profile_line）：内置+asset 同条目 → 第二次校验不符
+     abort 的陷阱，v0.7.1 特有，已修；
+  5. versionCode 10 / versionName 0.7.1。
+- 验证流程：commit push CI（assembleDebug）→ 用户装新 APK：
+  预期面板 `ats=1`、`source=asset`（或 override/builtin + 失败原因）、
+  「校验注入点」→「注入成功」、arm status=1，进局自动打且无 AUTOPLAY 字样。
+- 未解遗留：asset 加载失败根因（疑 MainHook 传 assets 或 AAssetManager_open）未深挖，
+  内置兜底已绕过；来源回报日志可供后续排查。
 
 ### 其他环境事实（重要）
 - 用户手机：华为 ROM（API 93），LSPosed；目标包 org.flos.phira.hacked（自编译 hacked 构建）
