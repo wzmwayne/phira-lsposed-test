@@ -189,6 +189,16 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
 
 ## 环境备注
 
+- 本会话机器（Debian, uid=1000 wayne, sudo 可用）逆向工具盘点（2026-08-23）：
+  - ✓ readelf/file/nm/strings/patchelf/hexdump/od、**aarch64-linux-gnu-objdump**
+    （已验证可正确反汇编目标分支区）、gdb 16.3、python3 3.13 + capstone 5.0.7
+    （aarch64 支持验证通过）、Java 25、apktool/baksmali/smali/aapt/adb、
+    unzip/zip/7z、curl/wget/git；
+  - ✗ 缺失：llvm-objdump/llvm-readelf、radare2/rizin 本体（仅 rz-bin/rz-asm/rz-ax，
+    其中 rz-asm 对 arm64 译码不可靠）、ghidra、frida、binwalk/yara、
+    python 的 lief/elftools/keystone/unicorn/r2pipe/frida；
+  - 结论：本机可完整复现 re/ 逆向流程（readelf 映射 + aarch64 objdump + capstone 扫描），
+    缺项可 sudo apt / pip3 补装。
 - 工作目录：`/home/wayne/date/phira`（Phira 上游仓库本体，模块是其中嵌套的独立 git 仓库）
 - 目标包名白名单已在 v0.3.0 移除门槛（用户包名 org.flos.phira.hacked）
 - 用户偏好：中文交流、节奏快、不要多余中断；重要决策先问一次即可；要求实时更新本文件
