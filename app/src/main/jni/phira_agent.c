@@ -1007,14 +1007,16 @@ static int apply_jitter(JNIEnv* env, const profile_t* pf, uintptr_t rs,
     w[n++] = 0x53000000u | (22u << 16) | (31u << 10) | (9u << 5) |
              9u; /* lsr w9,w9,#22 (imms=31) */
     w[n++] = 0x51000000u | (512u << 10) | (9u << 5) | 9u;         /* sub w9,w9,#512 */
-    w[n++] = 0x2A0903E5u;               /* mov w5,w9 (save hash) */
-    w[n++] = 0x5E61D800u | (9u << 5);   /* scvtf d0,w9 */
+    w[n++] = 0x2A0903E4u;               /* mov w4,w9 (save hash) */
+    w[n++] = 0x1E620100u | (9u << 5);   /* scvtf d0,w9 (NB: 0x5E61D800|(9<<5)
+                                           decodes as scvtf d0,d9 - SIMD src!
+                                           0x1E620100 family = scalar Wn src) */
     w[n++] = 0x5C000001u | (16u << 5);  /* ldr d1,[pc,#64] scale@0x5C */
     w[n++] = 0x1E610800u | (1u << 16);  /* fmul d0,d0,d1 -> offset seconds */
     w[n++] = 0x1E604008u;               /* fmov d8,d0 (stash, callee-saved) */
     w[n++] = 0x5C000001u | (15u << 5);  /* ldr d1,[pc,#60] 1e6@0x64 */
     w[n++] = 0x1E610800u | (1u << 16);  /* fmul d0,d0,d1 -> offset us */
-    w[n++] = 0x1E780004u;               /* fcvtzs w4,d0 (int us) */
+    w[n++] = 0x1E780005u;               /* fcvtzs w5,d0 (int us) */
     w[n++] = 0x2A1903E3u;               /* mov w3,w25 (note id) */
     w[n++] = 0xD2800080u;               /* mov x0,#4 (ANDROID_LOG_INFO) */
     w[n++] = 0x100001E1u;               /* adr x1,tag@0x78 (imm21=15) */
