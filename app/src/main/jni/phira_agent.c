@@ -49,6 +49,7 @@
 #define MAX_PATTERNS     4
 #define MAX_PAT_BYTES    32
 #define MAX_CANDS        64
+#define MAX_PATCH_GROUP  4
 #define MAX_SPAN_BYTES   (256UL * 1024 * 1024)
 
 /* ------------------------------------------------------------------ */
@@ -329,7 +330,10 @@ static int is_bl(uint32_t insn) { return (insn & 0xFC000000u) == 0x94000000u; }
 
 static int is_ret(uint32_t insn) { return insn == 0xD65F03C0u; }
 
-static int32_t imm14_of(uint32_t insn) { return ((int32_t)insn << 14) >> 18; }
+static int32_t imm14_of(uint32_t insn) {
+    /* signed imm14 at bits[18:5] (TBZ/TBNZ) */
+    return ((int32_t)insn << 13) >> 18;
+}
 
 static int32_t imm19_of(uint32_t insn) { return ((int32_t)insn << 8) >> 13; }
 
@@ -625,6 +629,7 @@ static void collect_structural(const profile_t* pf, uintptr_t rs, uintptr_t re,
         int32_t im = branch_imm(binsn);
         if (im == 0 || im == -1) continue;
         uintptr_t tgt = bpc + (uintptr_t)(im * 4);
+        if (tgt <= bpc) continue; /* backward branch = loop, not our shape */
         if (tgt < rs || tgt >= re) continue;
         if (!region_has_probe(pf, rs, re, pc) &&
             !near_use_site(pc, (uintptr_t)pf->xref_win)) {
@@ -838,58 +843,75 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
     LOGI("candidates in [%p,%p): %d (max_cand=%d)", (void*)rs, (void*)re, n,
          pf->max_cand);
 
-    /* detailed candidate dump (up to 8): form, offset, insn, site dist,
-     * branch target, polarity decision and score */
-    int dump = n > 8 ? 8 : n;
-    for (int i = 0; i < dump; i++) {
-        side_res_t sres =
-            resolve_auto_side_ex(rs, re, cands[i].pc, cands[i].insn);
-        int32_t im = branch_imm(cands[i].insn);
-        report(env, "cand%d %s @+%lx %08x d=%ld tgt=+%ld dec=%d h=%d st%d sf%d",
-               i, form_name(cands[i].insn), cands[i].pc - rs, cands[i].insn,
-               dist_to_sites(cands[i].pc), im * 4, sres.decision,
-               sres.heuristic, sres.st, sres.sf);
-    }
-
-    if (n == pf->max_cand) {
-        for (int i = 0; i < n; i++) {
-            int decision =
-                resolve_auto_side(rs, re, cands[i].pc, cands[i].insn);
-            if (rewrite_branch(rs, re, cands[i].pc, cands[i].insn, decision))
-                return 1;
-        }
-        return -1;
-    }
-
-    /* ranked best-of-N: only accept a strictly dominant top candidate */
-    if (!pf->best_of_n) {
-        LOGE("ambiguous (%d != %d) - refusing to patch", n, pf->max_cand);
-        report(env, "ambiguous (%d != max_cand), BEST_OF_N off - abort", n);
-        return -1;
-    }
+    /* score every candidate once */
     side_res_t res[MAX_CANDS];
     int scores[MAX_CANDS];
-    int best = 0, tie = 0;
     for (int i = 0; i < n; i++) {
         res[i] = resolve_auto_side_ex(rs, re, cands[i].pc, cands[i].insn);
         scores[i] = cand_score(&res[i]);
-        if (scores[i] > scores[best]) best = i;
     }
-    for (int i = 0; i < n && !tie; i++)
-        if (i != best && scores[i] >= scores[best]) tie = 1;
-    LOGI("ranked: best=cand%d score=%d tie=%d", best, scores[best], tie);
-    if (tie || scores[best] < 3) {
+
+    /* detailed candidate dump (up to 8): form, offset, insn, site dist,
+     * branch target, polarity decision and score */
+    int dump = n > 8 ? 8 : n;
+    for (int i = 0; verbose && i < dump; i++) {
+        int32_t im = branch_imm(cands[i].insn);
         report(env,
-               "no dominant candidate (%d cands, top score=%d%s) - abort",
-               n, scores[best], tie ? ", tie" : ", weak");
+               "cand%d %s @+%lx %08x d=%ld tgt=%+ld dec=%d h=%d st%d sf%d",
+               i, form_name(cands[i].insn), cands[i].pc - rs, cands[i].insn,
+               dist_to_sites(cands[i].pc), (long)im * 4, res[i].decision,
+               res[i].heuristic, res[i].st, res[i].sf);
+    }
+
+    if (!pf->best_of_n) {
+        /* legacy strict mode: candidate count must match exactly */
+        if (n != pf->max_cand) {
+            LOGE("ambiguous (%d != %d) - refusing to patch", n, pf->max_cand);
+            report(env, "ambiguous (%d != max_cand), BEST_OF_N off - abort", n);
+            return -1;
+        }
+        for (int i = 0; i < n; i++)
+            if (!rewrite_branch(rs, re, cands[i].pc, cands[i].insn,
+                                res[i].decision))
+                return -1;
+        return 1;
+    }
+
+    /* group selection: patch ALL candidates sharing the strictly top score
+     * when they are the same uniform idiom (compiler duplicates the check
+     * via jump threading - judge.rs:413 appears as identical copies). */
+    int top = 0;
+    for (int i = 0; i < n; i++)
+        if (scores[i] > scores[top]) top = i;
+    int grp[MAX_CANDS], ng = 0;
+    for (int i = 0; i < n && ng < MAX_CANDS; i++)
+        if (scores[i] == scores[top]) grp[ng++] = i;
+
+    int ok = scores[top] >= 3 && ng >= 1 && ng <= MAX_PATCH_GROUP;
+    for (int i = 0; ok && i < ng; i++) {
+        int j = grp[i];
+        if (cands[j].insn != cands[grp[0]].insn ||
+            res[j].decision != res[grp[0]].decision)
+            ok = 0; /* mixed idiom inside the top group: refuse */
+    }
+    LOGI("group: score=%d members=%d ok=%d", scores[top], ng, ok);
+    if (!ok) {
+        report(env,
+               "no confident group (%d cands, top score=%d, tied=%d%s) - abort",
+               n, scores[top], ng,
+               ng > MAX_PATCH_GROUP ? ", too many" : "");
         return -1;
     }
-    report(env, "best-of-%d: cand%d (%s @+%lx, score=%d)", n, best,
-           form_name(cands[best].insn), cands[best].pc - rs, scores[best]);
-    if (rewrite_branch(rs, re, cands[best].pc, cands[best].insn,
-                       res[best].decision))
-        return 1;
-    return -1;
+    for (int i = 0; i < ng; i++) {
+        int j = grp[i];
+        report(env, "patching cand%d (%s @+%lx -> %s)", j,
+               form_name(cands[j].insn), cands[j].pc - rs,
+               res[j].decision == 2 ? "NOP" : "B target");
+        if (!rewrite_branch(rs, re, cands[j].pc, cands[j].insn,
+                            res[j].decision))
+            return -1;
+    }
+    return 1;
 }
 
 /* status codes: 1 = patched; -1 = target lib never appeared;
