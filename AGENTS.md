@@ -203,6 +203,10 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
   全网唯一 "autoplay 计 rated" 源码实现，建议私有化/删除。
 
 ### 其他环境事实（重要）
+- ★测试链路（2026-08-23 用户确认）：官方包 org.flos.phira 通过**代理重定向**连测试设施——
+  GET（排行榜等读取）透传官方 phira.5wyxi.com 保证游戏功能正常；**所有提交操作
+  （上传/POST）在代理层被拦截、重定向到本地，绝不发往官方**。→ JITTER 使记录
+  std 可信后也不会污染官方榜单（提交到不了官方）。合规边界由此成立。
 - 用户手机：华为 ROM（API 93），LSPosed；目标包 org.flos.phira.hacked（自编译 hacked 构建）
   与原版 org.flos.phira 二进制特征一致。
 - /data/local/tmp 在 proot 内不可见不可写；/sdcard 直接可读。
