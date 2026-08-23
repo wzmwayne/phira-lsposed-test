@@ -172,6 +172,13 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
   不依赖本工具；②诚实分级（榜单/rks 完整性，非 RCE）；③只给零人工自动化方案
   （行为侧校验、载荷加逐 note 时序、顶分自动打标），顺团队人力约束。原则：概念级
   披露，不含偏移/字节/模块代码，不提工具与获取服务端方式，不公开 PoC。
+- **★判断误差链路手动汇编分析（2026-08-23，docs/judge-error-std-manual-analysis.md）**：
+  误差 = |hit−note|/speed（dca840 fsub 形态 + dca968 fabd 形态两处），分档阈值
+  LIMIT_PERFECT/GOOD/X_DIFF_MAX；偏移累加进 sp+80/88/104/112 统计槽；std 最终化候选
+  0xdb73a8（RMS：√(d9/count)→float）；**encode_record 读 res+0xCB8（std f64）→ fabs →
+  定点化 2^14 → 载荷**（编码器无 fsqrt，只搬运；载荷短=聚合字段，印证抓包）。
+  **auto 路径（注入）跳过整个误差链：写固定判定值 2 不碰统计器 → std=0 根源**。
+  待 GUI 确认：累加器语义、0xdb73a8 d9 数据流、judge 侧 res+0xCB8 写入点。
 - **公开网络调研（2026-08-23，docs/web-research-crack-vuln.md）**：全网**无** Phira 成熟
   外挂/作弊器、无 CVE/PoC/RCE。相关公开物：phira-customizer（资源"加密"=无密钥可逆
   混淆，谱面可自由导出）、非官方 API 文档（端点全图 + std 无暇度字段=反作弊信号）、
@@ -195,10 +202,13 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
     （aarch64 支持验证通过）、Java 25、apktool/baksmali/smali/aapt/adb、
     unzip/zip/7z、curl/wget/git；
   - ✗ 缺失：llvm-objdump/llvm-readelf、radare2/rizin 本体（仅 rz-bin/rz-asm/rz-ax，
-    其中 rz-asm 对 arm64 译码不可靠）、ghidra、frida、binwalk/yara、
+    其中 rz-asm 对 arm64 译码不可靠）、frida、binwalk/yara、
     python 的 lief/elftools/keystone/unicorn/r2pipe/frida；
-  - 结论：本机可完整复现 re/ 逆向流程（readelf 映射 + aarch64 objdump + capstone 扫描），
-    缺项可 sudo apt / pip3 补装。
+  - ✓ **Ghidra 12.1.3 PUBLIC（2026-08-23 已装）**：/opt/ghidra_12.1.3_PUBLIC，
+    /usr/local/bin/{ghidraRun,ghidra,analyzeHeadless}；Java 25 兼容（analyzeHeadless
+    实测可用）；GUI 用 `ghidra` 启动；
+  - 结论：本机可完整复现 re/ 逆向流程（readelf 映射 + aarch64 objdump + capstone 扫描 +
+    Ghidra 反编译），缺项可 sudo apt / pip3 补装。
 - 工作目录：`/home/wayne/date/phira`（Phira 上游仓库本体，模块是其中嵌套的独立 git 仓库）
 - 目标包名白名单已在 v0.3.0 移除门槛（用户包名 org.flos.phira.hacked）
 - 用户偏好：中文交流、节奏快、不要多余中断；重要决策先问一次即可；要求实时更新本文件
