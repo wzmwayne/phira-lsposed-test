@@ -48,7 +48,8 @@
 #define MAX_PROBES       8
 #define MAX_PATTERNS     4
 #define MAX_PAT_BYTES    32
-#define MAX_CANDS        64
+#define MAX_PATCH_ATS    4
+#define MAX_CANDS        128
 #define MAX_PATCH_GROUP  4
 #define MAX_SPAN_BYTES   (256UL * 1024 * 1024)
 
@@ -68,6 +69,12 @@ typedef struct {
 } pat_t;
 
 typedef struct {
+    long off;        /* span-relative byte offset (must be 4-aligned) */
+    uint32_t expect; /* required current word - refuse to touch on mismatch */
+    uint32_t repl;   /* replacement word, 0 = derive from expect (tbnz->B) */
+} patch_at_t;
+
+typedef struct {
     uint64_t probes[MAX_PROBES];
     int nprobes;
     long window;
@@ -76,6 +83,8 @@ typedef struct {
     int best_of_n; /* allow ranked best-of-N selection when N != max_cand */
     pat_t pats[MAX_PATTERNS];
     int npats;
+    patch_at_t patch_ats[MAX_PATCH_ATS];
+    int npatch_ats;
 } profile_t;
 
 static int hexval(char c) {
@@ -90,7 +99,7 @@ static void profile_defaults(profile_t* pf) {
     pf->probes[pf->nprobes++] = 0x3FB47AE147AE147BULL; /* f64 0.08 */
     pf->probes[pf->nprobes++] = 0x3FC47AE147AE147BULL; /* f64 0.16 */
     pf->window = 4096;
-    pf->xref_win = 2048;
+    pf->xref_win = 8192; /* real branch sits 4776B from nearest const site */
     pf->max_cand = 1;
     pf->best_of_n = 1;
 }
@@ -125,6 +134,21 @@ static void profile_line(profile_t* pf, char* s) {
             snprintf(buf, sizeof(buf), "/%s", name);
             g_lib_name = buf; /* bare file-name match */
         }
+    } else if (!strcmp(cmd, "PATCH_AT")) {
+        if (pf->npatch_ats >= MAX_PATCH_ATS) return;
+        patch_at_t* pa = &pf->patch_ats[pf->npatch_ats];
+        unsigned long off;
+        unsigned int expect, repl = 0;
+        int got = sscanf(rest, "%lx %x %x", &off, &expect, &repl);
+        if (got < 2) {
+            LOGE("PATCH_AT: need <hex_off> <hex_expect> [hex_repl]");
+            return;
+        }
+        if (off & 3u) return;
+        pa->off = (long)off;
+        pa->expect = (uint32_t)expect;
+        pa->repl = (uint32_t)repl; /* 0 => derive */
+        pf->npatch_ats++;
     } else if (!strcmp(cmd, "PROBE")) {
         char hex[32];
         if (pf->nprobes >= MAX_PROBES) return;
@@ -670,17 +694,19 @@ static void collect_patterns(const profile_t* pf, uintptr_t rs, uintptr_t re,
 /* polarity + rewrite                                                  */
 /* ------------------------------------------------------------------ */
 
-/* [bl ... b] shape: small straight-line block that calls and jumps away,
- * characteristic of the auto_play_update call site. */
-static int side_scores_bl_then_b(uintptr_t rs, uintptr_t re, uintptr_t from) {
-    int seen_bl = 0;
-    for (int i = 0; i < 20; i++) {
+/* strict call-then-jump shape: bl among the first few instructions,
+ * followed by an unconditional b - characteristic of the
+ * "auto_play_update(res, chart); return;" block (judge.rs:414-415). */
+static int side_call_ret_shape(uintptr_t rs, uintptr_t re, uintptr_t from) {
+    int seen_bl = -1;
+    for (int i = 0; i < 16; i++) {
         uintptr_t pc = from + (uintptr_t)i * 4;
         if (pc + 4 > re) break;
         uint32_t insn = *(volatile uint32_t*)pc;
         if (is_ret(insn)) break;
-        if (!seen_bl) {
-            if (is_bl(insn)) seen_bl = 1;
+        if (seen_bl < 0) {
+            if (i >= 6) break; /* the call must come early */
+            if (is_bl(insn)) seen_bl = i;
         } else if (is_b(insn)) {
             return 1;
         }
@@ -691,11 +717,12 @@ static int side_scores_bl_then_b(uintptr_t rs, uintptr_t re, uintptr_t from) {
 /* 1 = taken side is autoplay (rewrite branch -> B target),
  * 2 = fall-through side is autoplay (rewrite branch -> NOP).
  * Wrong guesses degrade to "always manual", never crash.
- * Score: 2 = cond-code heuristic (strong), +1 = exclusive [bl..b] shape. */
+ * heuristic: 2 = cond-code hint (tbnz / b.ne => taken, tbz / b.eq => not);
+ * st/sf: strict call-ret shape on taken / fall-through side. */
 typedef struct {
     int decision;
     int heuristic; /* 0/2 */
-    int st, sf;    /* [bl..b] shape on taken / fall-through side */
+    int st, sf;    /* call-ret shape on taken / fall-through side */
 } side_res_t;
 
 static side_res_t resolve_auto_side_ex(uintptr_t rs, uintptr_t re,
@@ -704,32 +731,33 @@ static side_res_t resolve_auto_side_ex(uintptr_t rs, uintptr_t re,
     if (is_tbz_bit0(insn)) {
         r.decision = (insn >> 24) == 0x37 ? 1 : 2;
         r.heuristic = 2;
-        return r;
-    }
-    if (is_bcond(insn)) {
+    } else if (is_bcond(insn)) {
         uint32_t cond = insn & 0xFu;
         if (cond == 1) {
             r.decision = 1;
             r.heuristic = 2;
-            return r;
-        }
-        if (cond == 0) {
+        } else if (cond == 0) {
             r.decision = 2;
             r.heuristic = 2;
-            return r;
         }
     }
+
+    /* shape is computed for EVERY candidate and combined with heuristic */
     int32_t im = branch_imm(insn);
     uintptr_t tgt = pc + (uintptr_t)(im * 4);
-    r.st = side_scores_bl_then_b(rs, re, tgt);
-    r.sf = side_scores_bl_then_b(rs, re, pc + 4);
-    if (r.st && !r.sf)
-        r.decision = 1;
-    else if (r.sf && !r.st)
-        r.decision = 2;
-    else {
-        LOGW("polarity unresolved @ %p, assuming taken side", (void*)pc);
-        r.decision = 1;
+    r.st = side_call_ret_shape(rs, re, tgt);
+    r.sf = side_call_ret_shape(rs, re, pc + 4);
+
+    if (!r.heuristic) {
+        /* no cond-code hint: decide purely by shape */
+        if (r.st && !r.sf)
+            r.decision = 1;
+        else if (r.sf && !r.st)
+            r.decision = 2;
+        else {
+            LOGW("polarity unresolved @ %p, assuming taken side", (void*)pc);
+            r.decision = 1;
+        }
     }
     return r;
 }
@@ -741,6 +769,59 @@ static int resolve_auto_side(uintptr_t rs, uintptr_t re, uintptr_t pc,
 
 static int cand_score(const side_res_t* s) {
     return s->heuristic + ((s->st ^ s->sf) ? 1 : 0);
+}
+
+/* raw word write with mprotect dance; caller verifies semantics first */
+static int patch_word(uintptr_t pc, uint32_t nw) {
+    uintptr_t page = pc & ~(uintptr_t)0xFFFu;
+    if (mprotect((void*)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        LOGE("mprotect RW failed: %s", strerror(errno));
+        return 0;
+    }
+    *(volatile uint32_t*)pc = nw;
+    __builtin___clear_cache((char*)pc, (char*)pc + 4);
+    mprotect((void*)page, 0x1000, PROT_READ | PROT_EXEC);
+    if (*(volatile uint32_t*)pc != nw) {
+        LOGE("verify failed @ %p", (void*)pc);
+        return 0;
+    }
+    return 1;
+}
+
+/* bonus by distance from enclosing function entry (proxy: last `ret`,
+ * prologue marker must follow within 6 insns). The autoplay check lives
+ * in the first few hundred bytes of judge::update - noise candidates
+ * usually do not. */
+static int entry_bonus(uintptr_t rs, uintptr_t re, uintptr_t pc) {
+    for (uintptr_t p = pc - 4; p >= rs && pc - p < 0x20000; p -= 4) {
+        uint32_t w = *(volatile uint32_t*)p;
+        if (w != 0xD65F03Cu) continue; /* ret */
+        for (int k = 1; k <= 6; k++) {
+            uintptr_t q = p + 4 * (uintptr_t)k;
+            if (q + 4 > re || q >= pc) break;
+            uint32_t w2 = *(volatile uint32_t*)q;
+            int sub_sp = (w2 & 0xFFC003FFu) == 0xD10003FFu;
+            int stp_fl = (w2 & 0xFFFFu) == 0x7BFDu && (w2 >> 24) == 0xA9u;
+            if (sub_sp || stp_fl) {
+                uintptr_t dist = pc - p - 4;
+                return dist <= 512 ? 2 : (dist <= 4096 ? 1 : 0);
+            }
+        }
+        break; /* ret without adjacent prologue: not a function boundary */
+    }
+    return 0;
+}
+
+/* +1 when a `ldrb wN,[xM,#imm]` sits within 8 insns before the branch -
+ * the autoplay test loads config.mods as a byte right beforehand */
+static int modload_bonus(uintptr_t rs, uintptr_t pc) {
+    for (int k = 1; k <= 8; k++) {
+        uintptr_t q = pc - 4 * (uintptr_t)k;
+        if (q < rs) break;
+        uint32_t w = *(volatile uint32_t*)q;
+        if ((w >> 22) == 0x0E5u) return 1; /* ldrb imm12 form */
+    }
+    return 0;
 }
 
 static int rewrite_branch(uintptr_t rs, uintptr_t re, uintptr_t pc,
@@ -763,19 +844,7 @@ static int rewrite_branch(uintptr_t rs, uintptr_t re, uintptr_t pc,
         nw = 0x14000000u | ((uint32_t)im & 0x03FFFFFFu);
     }
 
-    uintptr_t page = pc & ~(uintptr_t)0xFFFu;
-    if (mprotect((void*)page, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        LOGE("mprotect RW failed: %s", strerror(errno));
-        return 0;
-    }
-    *(volatile uint32_t*)pc = nw;
-    __builtin___clear_cache((char*)pc, (char*)pc + 4);
-    mprotect((void*)page, 0x1000, PROT_READ | PROT_EXEC);
-
-    if (*(volatile uint32_t*)pc != nw) {
-        LOGE("verify failed @ %p", (void*)pc);
-        return 0;
-    }
+    if (!patch_word(pc, nw)) return 0;
     LOGI("PATCHED %08x -> %08x @ %p", insn, nw, (void*)pc);
     return 1;
 }
@@ -791,6 +860,7 @@ static int g_failed = 0;
  * diagnosis never depends on logcat availability */
 static jclass g_cls = NULL;
 static jmethodID g_report_mid = NULL;
+static jmethodID g_status_mid = NULL;
 
 static void report(JNIEnv* env, const char* fmt, ...) {
     if (!env || !g_report_mid) return;
@@ -809,9 +879,64 @@ static void report(JNIEnv* env, const char* fmt, ...) {
     (*env)->DeleteLocalRef(env, s);
 }
 
+/* short Chinese state label for the overlay title bar */
+static void status(JNIEnv* env, const char* fmt, ...) {
+    if (!env || !g_status_mid) return;
+    char buf[96];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    jstring s = (*env)->NewStringUTF(env, buf);
+    if (!s) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        return;
+    }
+    (*env)->CallStaticVoidMethod(env, g_cls, g_status_mid, s);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, s);
+}
+
 static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
                    int verbose) {
     if (re <= rs || re - rs > MAX_SPAN_BYTES) return 0;
+
+    /* explicit PATCH_AT entries run first: verify word, then write */
+    if (pf->npatch_ats > 0) {
+        status(env, "校验注入点");
+        for (int i = 0; i < pf->npatch_ats; i++) {
+            const patch_at_t* pa = &pf->patch_ats[i];
+            uintptr_t pc = rs + (uintptr_t)pa->off;
+            if (pc < rs || pc + 4 > re) {
+                report(env, "PATCH_AT[%d] @+%lx out of span - abort", i,
+                       pa->off);
+                status(env, "越界放弃");
+                return -1;
+            }
+            uint32_t cur = *(volatile uint32_t*)pc;
+            if (cur != pa->expect) {
+                report(env, "PATCH_AT[%d] @+%lx: %08x != expect %08x - abort",
+                       i, pa->off, cur, pa->expect);
+                status(env, "校验不符");
+                return -1;
+            }
+            uint32_t nw = pa->repl;
+            if (!nw) { /* derive: tbnz -> unconditional B to same target */
+                int32_t im = branch_imm(pa->expect);
+                nw = 0x14000000u | ((uint32_t)im & 0x03FFFFFFu);
+            }
+            if (!patch_word(pc, nw)) {
+                report(env, "PATCH_AT[%d] write failed - abort", i);
+                status(env, "写入失败");
+                return -1;
+            }
+            LOGI("PATCH_AT[%d] %08x -> %08x @ %p", i, pa->expect, nw,
+                 (void*)pc);
+        }
+        report(env, "PATCH_AT: %d site(s) patched", pf->npatch_ats);
+        status(env, "注入成功");
+        return 1;
+    }
 
     /* one-shot scan: the 16MB walk costs ~10s, cache results per span */
     static cand_t cands[MAX_CANDS];
@@ -822,6 +947,7 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
     if (cached_rs != rs || cached_re != re) {
         n = 0;
         truncated = 0;
+        status(env, "扫描中");
         collect_structural(pf, rs, re, cands, &n, &truncated, &raw_tbz,
                            &raw_tst, &raw_cbz, &gated_out);
         collect_patterns(pf, rs, re, cands, &n);
@@ -838,17 +964,20 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
 
     if (n == 0) {
         if (verbose) report(env, "scan [%lx,%lx): no candidates", rs, re);
+        status(env, "未找到候选");
         return 0;
     }
     LOGI("candidates in [%p,%p): %d (max_cand=%d)", (void*)rs, (void*)re, n,
          pf->max_cand);
 
-    /* score every candidate once */
+    /* score every candidate once (+entry proximity, +mods-byte load nearby) */
+    status(env, "计算评分");
     side_res_t res[MAX_CANDS];
     int scores[MAX_CANDS];
     for (int i = 0; i < n; i++) {
         res[i] = resolve_auto_side_ex(rs, re, cands[i].pc, cands[i].insn);
-        scores[i] = cand_score(&res[i]);
+        scores[i] = cand_score(&res[i]) + entry_bonus(rs, re, cands[i].pc) +
+                    modload_bonus(rs, cands[i].pc);
     }
 
     /* detailed candidate dump (up to 8): form, offset, insn, site dist,
@@ -868,6 +997,7 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
         if (n != pf->max_cand) {
             LOGE("ambiguous (%d != %d) - refusing to patch", n, pf->max_cand);
             report(env, "ambiguous (%d != max_cand), BEST_OF_N off - abort", n);
+            status(env, "数量不符");
             return -1;
         }
         for (int i = 0; i < n; i++)
@@ -887,7 +1017,7 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
     for (int i = 0; i < n && ng < MAX_CANDS; i++)
         if (scores[i] == scores[top]) grp[ng++] = i;
 
-    int ok = scores[top] >= 3 && ng >= 1 && ng <= MAX_PATCH_GROUP;
+    int ok = scores[top] >= 4 && ng >= 1 && ng <= MAX_PATCH_GROUP;
     for (int i = 0; ok && i < ng; i++) {
         int j = grp[i];
         if (cands[j].insn != cands[grp[0]].insn ||
@@ -900,6 +1030,7 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
                "no confident group (%d cands, top score=%d, tied=%d%s) - abort",
                n, scores[top], ng,
                ng > MAX_PATCH_GROUP ? ", too many" : "");
+        status(env, "歧义放弃");
         return -1;
     }
     for (int i = 0; i < ng; i++) {
@@ -907,6 +1038,7 @@ static int attempt(JNIEnv* env, const profile_t* pf, uintptr_t rs, uintptr_t re,
         report(env, "patching cand%d (%s @+%lx -> %s)", j,
                form_name(cands[j].insn), cands[j].pc - rs,
                res[j].decision == 2 ? "NOP" : "B target");
+        status(env, "注入+%lx", cands[j].pc - rs);
         if (!rewrite_branch(rs, re, cands[j].pc, cands[j].insn,
                             res[j].decision))
             return -1;
@@ -921,14 +1053,18 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
     g_cls = (jclass)(*env)->NewGlobalRef(env, clazz);
     g_report_mid = (*env)->GetStaticMethodID(env, clazz, "report",
                                              "(Ljava/lang/String;)V");
+    g_status_mid = (*env)->GetStaticMethodID(env, clazz, "reportStatus",
+                                             "(Ljava/lang/String;)V");
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
 
     profile_t pf;
     profile_load(&pf, env, assets);
     LOGI("agent up: lib=%s window=%ld probes=%d patterns=%d max_cand=%d",
          g_lib_name, pf.window, pf.nprobes, pf.npats, pf.max_cand);
-    report(env, "profile: lib=%s win=%ld probes=%d pats=%d max=%d", g_lib_name,
-           pf.window, pf.nprobes, pf.npats, pf.max_cand);
+    report(env, "profile: lib=%s win=%ld probes=%d pats=%d max=%d ats=%d",
+           g_lib_name, pf.window, pf.nprobes, pf.npats, pf.max_cand,
+           pf.npatch_ats);
+    status(env, "自检");
 
     long waited = 0;
     int ever_seen = 0;
@@ -936,6 +1072,7 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
         if (g_failed) {
             LOGE("giving up permanently - nothing was written");
             report(env, "ambiguous candidates - aborted, nothing written");
+            status(env, "已放弃");
             return -3;
         }
         span_t spans[MAX_SPANS];
@@ -945,6 +1082,7 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
                 int xe = 0;
                 for (int i = 0; i < n; i++) xe += spans[i].exec;
                 report(env, "lib mapped: %d span(s), exec=%d", n, xe);
+                status(env, "定位段");
             }
             {
                 /* re-map / layout change => rebuild fingerprint + rescan */
@@ -971,6 +1109,7 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
             }
             if (done) {
                 LOGI("injection complete after %ld ms", waited);
+                status(env, "注入成功");
                 return 1;
             }
             if (decisive_fail && g_lib_polls >= LIB_POLLS_BEFORE_FAIL) {
@@ -978,6 +1117,7 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
             }
         } else {
             g_lib_polls = 0;
+            status(env, "等待so");
         }
         if ((waited / POLL_MS) % 25 == 24)
             report(env, "waiting... %lds seen=%d polls=%d", waited / 1000,
@@ -991,8 +1131,10 @@ Java_cn_test_phirauto_PhiraAgent_arm(JNIEnv* env, jclass clazz, jobject assets) 
         dump_loaded_libs();
         report(env, "timeout: '%s' never appeared (see logcat for lib list)",
                g_lib_name);
+        status(env, "未找到so");
         return -1;
     }
     report(env, "timeout: lib seen but no match");
+    status(env, "超时");
     return -2;
 }

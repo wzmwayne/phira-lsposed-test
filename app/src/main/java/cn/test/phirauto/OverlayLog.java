@@ -24,6 +24,8 @@ public final class OverlayLog {
     private static final ArrayDeque<String> BUF = new ArrayDeque<>();
     private static final SimpleDateFormat FMT = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US);
     private static volatile TextView body;
+    private static volatile TextView statusView;
+    private static volatile String lastStatus = "待机";
     private static volatile boolean attachedToCurrent;
 
     private OverlayLog() {}
@@ -57,6 +59,13 @@ public final class OverlayLog {
         if (v != null) v.post(() -> flush());
     }
 
+    /** Short state label shown right of the title, e.g. 自检 / 扫描中 / 注入成功. */
+    public static void status(String s) {
+        lastStatus = (s == null || s.isEmpty()) ? "待机" : s;
+        TextView v = statusView;
+        if (v != null) v.post(() -> v.setText(lastStatus));
+    }
+
     private static void flush() {
         TextView v = body;
         if (v == null) return;
@@ -88,6 +97,18 @@ public final class OverlayLog {
         bar.addView(title, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
+        TextView status = new TextView(activity);
+        status.setTextColor(0xFF4DD0E1);
+        status.setTextSize(11f);
+        status.setTypeface(Typeface.DEFAULT_BOLD);
+        status.setSingleLine();
+        status.setPadding(0, 0, dp(activity, 8), 0);
+        status.setText(lastStatus);
+        statusView = status;
+        bar.addView(status, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
         Button close = new Button(activity);
         close.setText("关闭");
         close.setTextSize(11f);
@@ -97,6 +118,7 @@ public final class OverlayLog {
             ViewGroup parent = (ViewGroup) panel.getParent();
             if (parent != null) parent.removeView(panel);
             body = null;
+            statusView = null;
             attachedToCurrent = false;
         });
         bar.addView(close, new LinearLayout.LayoutParams(

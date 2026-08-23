@@ -1,15 +1,22 @@
-# PhiraAgent location profile (v0.1 defaults)
+# PhiraAgent location profile (v0.7 defaults)
 # Adapt to future libphira.so builds WITHOUT touching C code:
 #   1) edit this file and rebuild in CI, or
 #   2) push an edited copy to /data/local/tmp/phira_autoplay_profile.txt (live override)
 #
 # WINDOW    +/- byte range searched for PROBE fingerprints around a candidate branch
+# XREF_WIN  max distance (bytes) from an adrp+ldr constant use site for a
+#           structural candidate to survive gating (default 8192)
 # MAX_CAND  abort unless exactly this many candidates survive filtering (fail-safe)
+# BEST_OF_N 0 = strict count match; 1 = group selection (default)
 # LIB       target library name (default libphira.so); bare name or full path suffix
 # PROBE     16-hex-digit little-endian f64 literal that must exist near the target
 # PATTERN   explicit masked byte pattern: hex bytes, ".." = wildcard byte,
 #           followed by the offset of the branch instruction inside the match
-#           (a lone "-1" disables pattern mode)
+# PATCH_AT  <hex span offset> <hex expect insn> [hex replacement] - direct patch;
+#           word at offset MUST equal expect or the agent refuses (fail-safe);
+#           omit replacement to derive tbnz -> unconditional B to same target.
+#           Current build (Phira_0.8.2): judge::update entry ~0xdc9288,
+#           branch at vaddr 0xdc92d0 = span+0x6D92D0, see docs/re-judge-update.md
 
 WINDOW 4096
 MAX_CAND 1
@@ -21,5 +28,4 @@ LIB libphira.so
 PROBE 3FB47AE147AE147B
 PROBE 3FC47AE147AE147B
 
-# example explicit-pattern line (disabled by default):
-# PATTERN ..230037 0
+PATCH_AT 6d92d0 37000548

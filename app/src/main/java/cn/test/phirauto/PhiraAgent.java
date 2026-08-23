@@ -21,4 +21,9 @@ public final class PhiraAgent {
     public static void report(String line) {
         OverlayLog.log("[agent] " + line);
     }
+
+    /** Called from native to update the short status label in the title bar. */
+    public static void reportStatus(String line) {
+        OverlayLog.status(line);
+    }
 }

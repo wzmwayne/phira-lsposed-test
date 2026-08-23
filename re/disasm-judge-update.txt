@@ -1,0 +1,179 @@
+
+libphira.so:	file format elf64-littleaarch64
+
+Disassembly of section .text:
+
+0000000000daf3e8 <Java_quad_1native_QuadNative_preprocessInput>:
+  dc927c: b0005220     	adrp	x0, 0x180e000
+  dc9280: 910c8000     	add	x0, x0, #0x320
+  dc9284: 9427b780     	bl	0x17b7084 <jni_on_load+0x1ebee0>
+  dc9288: 6db63bef     	stp	d15, d14, [sp, #-0xa0]!
+  dc928c: 6d0133ed     	stp	d13, d12, [sp, #0x10]
+  dc9290: 6d022beb     	stp	d11, d10, [sp, #0x20]
+  dc9294: 6d0323e9     	stp	d9, d8, [sp, #0x30]
+  dc9298: a9047bfd     	stp	x29, x30, [sp, #0x40]
+  dc929c: a9056ffc     	stp	x28, x27, [sp, #0x50]
+  dc92a0: a90667fa     	stp	x26, x25, [sp, #0x60]
+  dc92a4: a9075ff8     	stp	x24, x23, [sp, #0x70]
+  dc92a8: a90857f6     	stp	x22, x21, [sp, #0x80]
+  dc92ac: a9094ff4     	stp	x20, x19, [sp, #0x90]
+  dc92b0: 910103fd     	add	x29, sp, #0x40
+  dc92b4: d10b03ff     	sub	sp, sp, #0x2c0
+  dc92b8: 39422028     	ldrb	w8, [x1, #0x88]
+  dc92bc: aa0203fc     	mov	x28, x2
+  dc92c0: aa0103f5     	mov	x21, x1
+  dc92c4: f90047e3     	str	x3, [sp, #0x88]
+  dc92c8: f90063e0     	str	x0, [sp, #0xc0]
+  dc92cc: f90053e1     	str	x1, [sp, #0xa0]
+  dc92d0: 37000548     	tbnz	w8, #0x0, 0xdc9378 <Java_quad_1native_QuadNative_preprocessInput+0x19f90>
+  dc92d4: bd409ea0     	ldr	s0, [x21, #0x9c]
+  dc92d8: d102c3a1     	sub	x1, x29, #0xb0
+  dc92dc: 52800020     	mov	w0, #0x1                // =1
+  dc92e0: a9357fbf     	stp	xzr, xzr, [x29, #-0xb0]
+  dc92e4: 1e22c000     	fcvt	d0, s0
+  dc92e8: fd007fe0     	str	d0, [sp, #0xf8]
+  dc92ec: 9427fb0d     	bl	0x17c7f20 <clock_gettime@plt>
+  dc92f0: 35018ee0     	cbnz	w0, 0xdcc4cc <Java_quad_1native_QuadNative_preprocessInput+0x1d0e4>
+  dc92f4: 6d7503a1     	ldp	d1, d0, [x29, #-0xb0]
+  dc92f8: f0ffa568     	adrp	x8, 0x278000
+  dc92fc: fd406902     	ldr	d2, [x8, #0xd0]
+  dc9300: d10343a8     	sub	x8, x29, #0xd0
+  dc9304: 5e61d800     	scvtf	d0, d0
+  dc9308: 5e61d821     	scvtf	d1, d1
+  dc930c: 1e620800     	fmul	d0, d0, d2
+  dc9310: 1e612800     	fadd	d0, d0, d1
+  dc9314: fd44f2a1     	ldr	d1, [x21, #0x9e0]
+  dc9318: 6d1007e0     	stp	d0, d1, [sp, #0x100]
+  dc931c: 941d58a7     	bl	0x151f5b8 <Java_moe_mivik_inputbox_InputBox_inputCallback+0x6a4b78>
+  dc9320: 52800020     	mov	w0, #0x1                // =1
+  dc9324: 941d581e     	bl	0x151f39c <Java_moe_mivik_inputbox_InputBox_inputCallback+0x6a495c>
+  dc9328: 360016e0     	tbz	w0, #0x0, 0xdc9604 <Java_quad_1native_QuadNative_preprocessInput+0x1a21c>
+  dc932c: 941d57ba     	bl	0x151f214 <Java_moe_mivik_inputbox_InputBox_inputCallback+0x6a47d4>
+  dc9330: 1e204009     	fmov	s9, s0
+  dc9334: 1e204028     	fmov	s8, s1
+  dc9338: f85403b3     	ldur	x19, [x29, #-0xc0]
+  dc933c: f85303a8     	ldur	x8, [x29, #-0xd0]
+  dc9340: eb08027f     	cmp	x19, x8
+  dc9344: 54000061     	b.ne	0xdc9350 <Java_quad_1native_QuadNative_preprocessInput+0x19f68>
+  dc9348: d10343a0     	sub	x0, x29, #0xd0
+  dc934c: 97fcbe08     	bl	0xcf8b6c <quad_main+0x1bbc44>
+  dc9350: f85383a8     	ldur	x8, [x29, #-0xc8]
+  dc9354: 92800009     	mov	x9, #-0x1               // =-1
+  dc9358: 8b131508     	add	x8, x8, x19, lsl #5
+  dc935c: f9000109     	str	x9, [x8]
+  dc9360: d2fffe09     	mov	x9, #-0x10000000000000  // =-4503599627370496
+  dc9364: f9000909     	str	x9, [x8, #0x10]
+  dc9368: 91000669     	add	x9, x19, #0x1
+  dc936c: 2d012109     	stp	s9, s8, [x8, #0x8]
+  dc9370: 3900611f     	strb	wzr, [x8, #0x18]
+  dc9374: 1400025a     	b	0xdc9cdc <Java_quad_1native_QuadNative_preprocessInput+0x1a8f4>
+  dc9378: a947a78a     	ldp	x10, x9, [x28, #0x78]
+  dc937c: f9400808     	ldr	x8, [x0, #0x10]
+  dc9380: fd44f2a0     	ldr	d0, [x21, #0x9e0]
+  dc9384: f81403bf     	stur	xzr, [x29, #-0xc0]
+  dc9388: fd005fe0     	str	d0, [sp, #0xb8]
+  dc938c: eb09011f     	cmp	x8, x9
+  dc9390: bd409ea0     	ldr	s0, [x21, #0x9c]
+  dc9394: a90aabe9     	stp	x9, x10, [sp, #0xa8]
+  dc9398: 5280010a     	mov	w10, #0x8               // =8
+  dc939c: 9a893108     	csel	x8, x8, x9, lo
+  dc93a0: a9332bbf     	stp	xzr, x10, [x29, #-0xd0]
+  dc93a4: f9004fe8     	str	x8, [sp, #0x98]
+  dc93a8: b40014e8     	cbz	x8, 0xdc9644 <Java_quad_1native_QuadNative_preprocessInput+0x1a25c>
+  dc93ac: 1e22c008     	fcvt	d8, s0
+  dc93b0: f9400408     	ldr	x8, [x0, #0x8]
+  dc93b4: aa1f03f9     	mov	x25, xzr
+  dc93b8: 5280311a     	mov	w26, #0x188             // =392
+  dc93bc: f9004be8     	str	x8, [sp, #0x90]
+  dc93c0: 14000005     	b	0xdc93d4 <Java_quad_1native_QuadNative_preprocessInput+0x19fec>
+  dc93c4: f9404fe8     	ldr	x8, [sp, #0x98]
+  dc93c8: 91000739     	add	x25, x25, #0x1
+  dc93cc: eb08033f     	cmp	x25, x8
+  dc93d0: 54001140     	b.eq	0xdc95f8 <Java_quad_1native_QuadNative_preprocessInput+0x1a210>
+  dc93d4: f9404be8     	ldr	x8, [sp, #0x90]
+  dc93d8: 8b19151c     	add	x28, x8, x25, lsl #5
+  dc93dc: a9410381     	ldp	x1, x0, [x28, #0x10]
+  dc93e0: eb01001f     	cmp	x0, x1
+  dc93e4: 54017fc8     	b.hi	0xdcc3dc <Java_quad_1native_QuadNative_preprocessInput+0x1cff4>
+  dc93e8: 52806009     	mov	w9, #0x300              // =768
+  dc93ec: f9405be8     	ldr	x8, [sp, #0xb0]
+  dc93f0: eb01001f     	cmp	x0, x1
+  dc93f4: 9b092336     	madd	x22, x25, x9, x8
+  dc93f8: 540002a1     	b.ne	0xdc944c <Java_quad_1native_QuadNative_preprocessInput+0x1a064>
+  dc93fc: a9412b88     	ldp	x8, x10, [x28, #0x10]
+  dc9400: eb0a0108     	subs	x8, x8, x10
+  dc9404: 54fffe09     	b.ls	0xdc93c4 <Java_quad_1native_QuadNative_preprocessInput+0x19fdc>
+  dc9408: f9400789     	ldr	x9, [x28, #0x8]
+  dc940c: 8b0a0929     	add	x9, x9, x10, lsl #2
+  dc9410: 9100054a     	add	x10, x10, #0x1
+  dc9414: b8404538     	ldr	w24, [x9], #0x4
+  dc9418: f940eac1     	ldr	x1, [x22, #0x1d0]
+  dc941c: eb18003f     	cmp	x1, x24
+  dc9420: 54018869     	b.ls	0xdcc52c <Java_quad_1native_QuadNative_preprocessInput+0x1d144>
+  dc9424: f940e6cb     	ldr	x11, [x22, #0x1c8]
+  dc9428: 9bba2f0b     	umaddl	x11, w24, w26, x11
+  dc942c: 3940c16b     	ldrb	w11, [x11, #0x30]
+  dc9430: 7100097f     	cmp	w11, #0x2
+  dc9434: 54fffc81     	b.ne	0xdc93c4 <Java_quad_1native_QuadNative_preprocessInput+0x19fdc>
+  dc9438: f1000508     	subs	x8, x8, #0x1
+  dc943c: f9000f8a     	str	x10, [x28, #0x18]
+  dc9440: 9100054a     	add	x10, x10, #0x1
+  dc9444: 54fffe81     	b.ne	0xdc9414 <Java_quad_1native_QuadNative_preprocessInput+0x1a02c>
+  dc9448: 17ffffdf     	b	0xdc93c4 <Java_quad_1native_QuadNative_preprocessInput+0x19fdc>
+  dc944c: f9400788     	ldr	x8, [x28, #0x8]
+  dc9450: 8b010913     	add	x19, x8, x1, lsl #2
+  dc9454: 8b000914     	add	x20, x8, x0, lsl #2
+  dc9458: aa1403f7     	mov	x23, x20
+  dc945c: 14000005     	b	0xdc9470 <Java_quad_1native_QuadNative_preprocessInput+0x1a088>
+  dc9460: 34000488     	cbz	w8, 0xdc94f0 <Java_quad_1native_QuadNative_preprocessInput+0x1a108>
+  dc9464: eb1302ff     	cmp	x23, x19
+  dc9468: aa1703f4     	mov	x20, x23
+  dc946c: 54fffc80     	b.eq	0xdc93fc <Java_quad_1native_QuadNative_preprocessInput+0x1a014>
+  dc9470: b84046f8     	ldr	w24, [x23], #0x4
+  dc9474: f940eac1     	ldr	x1, [x22, #0x1d0]
+  dc9478: eb18003f     	cmp	x1, x24
+  dc947c: 540183a9     	b.ls	0xdcc4f0 <Java_quad_1native_QuadNative_preprocessInput+0x1d108>
+  dc9480: f940e6c8     	ldr	x8, [x22, #0x1c8]
+  dc9484: 9bba231b     	umaddl	x27, w24, w26, x8
+  dc9488: 3940c368     	ldrb	w8, [x27, #0x30]
+  dc948c: 71000d1f     	cmp	w8, #0x3
+  dc9490: 54fffe81     	b.ne	0xdc9460 <Java_quad_1native_QuadNative_preprocessInput+0x1a078>
+  dc9494: f9400368     	ldr	x8, [x27]
+  dc9498: f100051f     	cmp	x8, #0x1
+  dc949c: 54fffe41     	b.ne	0xdc9464 <Java_quad_1native_QuadNative_preprocessInput+0x1a07c>
+  dc94a0: fd400760     	ldr	d0, [x27, #0x8]
+  dc94a4: fd405fe1     	ldr	d1, [sp, #0xb8]
+  dc94a8: 1e602020     	fcmp	d1, d0
+  dc94ac: 54fffdcb     	b.lt	0xdc9464 <Java_quad_1native_QuadNative_preprocessInput+0x1a07c>
+  dc94b0: 52800048     	mov	w8, #0x2                // =2
+  dc94b4: 3900c368     	strb	w8, [x27, #0x30]
+  dc94b8: f85403b8     	ldur	x24, [x29, #-0xc0]
+  dc94bc: f85303a8     	ldur	x8, [x29, #-0xd0]
+  dc94c0: b9400294     	ldr	w20, [x20]
+  dc94c4: eb08031f     	cmp	x24, x8
+  dc94c8: 54000061     	b.ne	0xdc94d4 <Java_quad_1native_QuadNative_preprocessInput+0x1a0ec>
+  dc94cc: d10343a0     	sub	x0, x29, #0xd0
+  dc94d0: 97fcbcf1     	bl	0xcf8894 <quad_main+0x1bb96c>
+  dc94d4: f85383a8     	ldur	x8, [x29, #-0xc8]
+  dc94d8: 91000709     	add	x9, x24, #0x1
+  dc94dc: 8b181108     	add	x8, x8, x24, lsl #4
+  dc94e0: f9000119     	str	x25, [x8]
+  dc94e4: b9000914     	str	w20, [x8, #0x8]
+  dc94e8: f81403a9     	stur	x9, [x29, #-0xc0]
+  dc94ec: 17ffffde     	b	0xdc9464 <Java_quad_1native_QuadNative_preprocessInput+0x1a07c>
+  dc94f0: fd40a360     	ldr	d0, [x27, #0x140]
+  dc94f4: fd405fe1     	ldr	d1, [sp, #0xb8]
+  dc94f8: 1e612000     	fcmp	d0, d1
+  dc94fc: 54fff80c     	b.gt	0xdc93fc <Java_quad_1native_QuadNative_preprocessInput+0x1a014>
+  dc9500: f9400368     	ldr	x8, [x27]
+  dc9504: f100051f     	cmp	x8, #0x1
+  dc9508: 54000461     	b.ne	0xdc9594 <Java_quad_1native_QuadNative_preprocessInput+0x1a1ac>
+  dc950c: 91006360     	add	x0, x27, #0x18
+  dc9510: aa1503e1     	mov	x1, x21
+  dc9514: 97fffafe     	bl	0xdc810c <Java_quad_1native_QuadNative_preprocessInput+0x18d24>
+  dc9518: f94063f5     	ldr	x21, [sp, #0xc0]
+  dc951c: f940bea8     	ldr	x8, [x21, #0x178]
+  dc9520: b5017a68     	cbnz	x8, 0xdcc46c <Java_quad_1native_QuadNative_preprocessInput+0x1d084>
+  dc9524: 92800009     	mov	x9, #-0x1               // =-1
+  dc9528: f940cab7     	ldr	x23, [x21, #0x190]
+  dc952c: f940c2a8     	ldr	x8, [x21, #0x180]
