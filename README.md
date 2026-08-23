@@ -20,22 +20,23 @@ Phira 全部游戏逻辑在 `libphira.so`（Rust cdylib）。原生 autoplay 由
 
 release 二进制已 strip 且随版本变化，模块不做任何死定位：
 
-1. **结构扫描**：`tbz/tbnz`（测 bit0）或 `tst wn,#1` + `b.cond` 指令形态；
-2. **指纹门控**：候选 ±WINDOW 字节内必须存在 prpr 判定常量 f64 字面量
-   （LIMIT_PERFECT=0.08、LIMIT_GOOD=0.16，见 `assets/phira_profile.txt`）；
-3. **极性判定**：cond 码启发式 + `[bl ... b]` 形态评分；猜错只会退化为
-   always-manual（安全无效），不会崩溃；
-4. **显式 PATTERN 兜底**：profile 支持带通配符的字节模式。
+1. **PATCH_AT 直写（首选）**：profile 指令 `PATCH_AT <span偏移> <expect指令>`，
+   写入前校验原值、不符即拒绝；省略替换则自动推导 tbnz→无条件 B 同目标。
+   当前构建（Phira_0.8.2）内置默认已含该条目，无需任何 profile 也能注入；
+2. **结构扫描兜底**：`tbz/tbnz`（测 bit0）或 `tst wn,#1` + `b.cond` 指令形态 +
+   adrp/ldr 常量引用点门控 + 评分组选择；
+3. **显式 PATTERN 兜底**：profile 支持带通配符的字节模式。
 
-任一环节不确定 → **放弃，不写入任何字节**（候选数必须恰好等于 `MAX_CAND`）。
+任一环节不确定 → **放弃，不写入任何字节**（fail-safe：歧义绝不写入）。
 
 ### 适配未来版本
 
-无需改 C 代码，按优先级读取 profile：
+无需改 C 代码，按优先级读取 profile（面板会回报实际来源）：
 
-1. `/data/local/tmp/phira_autoplay_profile.txt`（热更，免重装）
+1. `/sdcard/Documents/phira_autoplay_profile.txt`（热更，免重装；旧
+   `/data/local/tmp` 路径已废弃）
 2. APK 内 asset `phira_profile.txt`（改完推 CI 重编即可）
-3. 编译期内置默认
+3. 编译期内置默认（已含当前构建的 PATCH_AT，asset 加载失败也能注入）
 
 profile 语法见 `app/src/main/assets/phira_profile.txt` 头部注释。
 新版本失效时的排查步骤：
