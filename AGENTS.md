@@ -100,11 +100,11 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
   上传门控 game.rs:949-957：**#[cfg(closed)] 整段 OSS 构建剔除** +
   offline_mode/UNRATED/use_keyboard/speed≥1.0 检查；本地 best 走 save_fn+SimpleRecord。
 
-### v0.7.1（代码完成，CI/装机验证待跑）【下一步】
+### v0.7.1（✅ 已装机验证：注入生效）【已解决】
 - 背景（v0.7.0 实测）：面板日志 `ats=0` → PATCH_AT 未生效，扫描路径 cand=71 全 tie
   → abort(-3)；日志值恰等于内置默认 → 疑似 asset 根本没被加载。目标 span+0x6d92d0
   不在候选中（距引用点~70KB，预期内，扫描路线对本构建本就无效）。
-- v0.7.1 已完成的修复（当前工作区）：
+- v0.7.1 已完成的修复（commit c9c4b46）：
   1. PROFILE_OVERRIDE → `/sdcard/Documents/phira_autoplay_profile.txt`，旧
      `/data/local/tmp` 路径删除（用户明确指示）；
   2. profile_load 三路来源显式回报面板：`source=override/asset/builtin`；
@@ -115,11 +115,12 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
   4. ★PATCH_AT 按 offset 去重（profile_line）：内置+asset 同条目 → 第二次校验不符
      abort 的陷阱，v0.7.1 特有，已修；
   5. versionCode 10 / versionName 0.7.1。
-- 验证流程：commit push CI（assembleDebug）→ 用户装新 APK：
-  预期面板 `ats=1`、`source=asset`（或 override/builtin + 失败原因）、
-  「校验注入点」→「注入成功」、arm status=1，进局自动打且无 AUTOPLAY 字样。
-- 未解遗留：asset 加载失败根因（疑 MainHook 传 assets 或 AAssetManager_open）未深挖，
-  内置兜底已绕过；来源回报日志可供后续排查。
+- 验证结果（用户确认）：**注入生效**——面板 `校验注入点` → `注入成功`、arm status=1、
+  进局自动打。CI 两次构建全绿（1m50s / 1m25s）。
+- ★安全措施（2026-08-23）：**仓库已设为 PRIVATE**（gh repo edit --visibility private），
+  防止注入手法被他人利用；后续 push 走私有 Actions（免费额度内）。
+- 未解遗留（低优先级）：asset 加载失败根因（疑 MainHook 传 assets 或 AAssetManager_open）
+  未深挖，内置兜底已绕过；来源回报日志可供后续排查。
 
 ### 其他环境事实（重要）
 - 用户手机：华为 ROM（API 93），LSPosed；目标包 org.flos.phira.hacked（自编译 hacked 构建）
