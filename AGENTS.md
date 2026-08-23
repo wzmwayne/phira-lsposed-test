@@ -135,6 +135,12 @@ LSPosed 模块。已确认采用「方向 1」方案，其余方向（方向 2 �
   这是方向 1「不改 mods」的固有结果，演示连自建服务端属预期。
 - **设计边界**：patch 对进程是**全有全无**——装上即每次进局都自动打，无按局切换；
   需要"真玩+上传"时须在 LSPosed 停用模块或换未 patch 安装。
+- **公开网络调研（2026-08-23，docs/web-research-crack-vuln.md）**：全网**无** Phira 成熟
+  外挂/作弊器、无 CVE/PoC/RCE。相关公开物：phira-customizer（资源"加密"=无密钥可逆
+  混淆，谱面可自由导出）、非官方 API 文档（端点全图 + std 无暇度字段=反作弊信号）、
+  phira_ipa 等 iOS 重打包、下载站"修改版"（低可信）、phira-mp 自建服生态（无反作弊）。
+  上游 security 标签 issue 均琐碎。用户本人公开的 phira-autoplay-rated（已放弃）是
+  全网唯一 "autoplay 计 rated" 源码实现，建议私有化/删除。
 
 ### 其他环境事实（重要）
 - 用户手机：华为 ROM（API 93），LSPosed；目标包 org.flos.phira.hacked（自编译 hacked 构建）
