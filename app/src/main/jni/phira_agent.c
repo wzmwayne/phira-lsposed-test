@@ -63,6 +63,7 @@ static const char* g_lib_name = DEFAULT_LIB_NAME;
 
 static void report(JNIEnv* env, const char* fmt, ...); /* fwd: defined later */
 static void status(JNIEnv* env, const char* fmt, ...);  /* fwd: defined later */
+static void apply_encode_hook(JNIEnv* env, uintptr_t rs, uintptr_t re); /* fwd */
 
 typedef struct {
     unsigned char bytes[MAX_PAT_BYTES];
@@ -1082,7 +1083,87 @@ static int apply_jitter(JNIEnv* env, const profile_t* pf, uintptr_t rs,
     report(env, "JITTER: std~=%dms seed=%08x cave=+0x%lx", jit->sigma_ms, seed,
            cave - rs);
     status(env, "抖动注入");
+    apply_encode_hook(env, rs, re);
     return 1;
+}
+
+/* debug: hook encode_record entry to dump the res fields the server sees
+ * (std f64 @+0xCB8, judgement counts @+3504/3508/3512, score @+648).
+ * encode_record entry = vaddr 0xd24860 = span+0x634860 for Phira_0.8.2,
+ * first word 0xFC190FE8 (str d8,[sp,#-112]!). Trampoline lives in the
+ * second cave found after the jitter cave (span+0x1009028, 280B zeros). */
+static void apply_encode_hook(JNIEnv* env, uintptr_t rs, uintptr_t re) {
+    const uintptr_t enc_off = 0x634860L;      /* span offset of encode_record */
+    const uint32_t enc_expect = 0xFC190FE8u;  /* str d8, [sp, #-112]! */
+    uintptr_t pc = rs + enc_off;
+    if (pc < rs || pc + 4 > re) return;
+    if (*(volatile uint32_t*)pc != enc_expect) {
+        LOGW("encode hook @+%lx: %08x != expect %08x - skip", enc_off,
+             *(volatile uint32_t*)pc, enc_expect);
+        return;
+    }
+
+    /* second cave after the jitter trampoline cave: search from .text start
+     * (span+0x200) so find_cave skips the LOAD#1-tail run at +0x118 that the
+     * jitter trampoline already occupies. First big zero run in .text for
+     * Phira_0.8.2 is span+0x1009028 (280B). */
+    uintptr_t cave2 = find_cave(rs + 0x200L, re, 128);
+    if (!cave2 || cave2 + 128 > re) {
+        LOGW("encode hook: no second cave - skip");
+        return;
+    }
+    LOGI("encode hook: cave2 @ +0x%lx", cave2 - rs);
+    report(env, "ENC: cave2 @ +0x%lx", cave2 - rs);
+
+    unsigned char img[128];
+    memset(img, 0, sizeof(img));
+    uint32_t* w = (uint32_t*)img;
+    int n = 0;
+    /* layout: 13 instr = 0x34; logfn@0x34 tag@0x3C fmt@0x48 */
+    w[n++] = 0xFD400000u | (3256u >> 3 << 10) | (0u << 5) | 0u;
+                                   /* ldr d0,[x0,#3256] res+0xCB8 std f64 */
+    w[n++] = 0x9E660003u;          /* fmov x3,d0 (arg3 = std bits) */
+    w[n++] = 0xB9400000u | (3504u >> 2 << 10) | (0u << 5) | 4u;
+                                   /* ldr w4,[x0,#3504] */
+    w[n++] = 0xB9400000u | (3508u >> 2 << 10) | (0u << 5) | 5u;
+                                   /* ldr w5,[x0,#3508] */
+    w[n++] = 0xB9400000u | (3512u >> 2 << 10) | (0u << 5) | 6u;
+                                   /* ldr w6,[x0,#3512] */
+    w[n++] = 0xB9400000u | (648u >> 2 << 10) | (0u << 5) | 7u;
+                                   /* ldr w7,[x0,#648] */
+    w[n++] = 0xD2800080u;          /* mov x0,#4 */
+    w[n++] = 0x10000000u | ((0x20u >> 2) << 5) | (0x20u & 3) | 1u;
+                                   /* adr x1,tag@0x3C */
+    w[n++] = 0x10000000u | ((0x28u >> 2) << 5) | (0x28u & 3) | 2u;
+                                   /* adr x2,fmt@0x48 */
+    w[n++] = 0x58000000u | (0x10u >> 2 << 5) | 9u;
+                                   /* ldr x9,[pc,#0x10] logfn@0x34 */
+    w[n++] = 0xD63F0120u;          /* blr x9 */
+    w[n++] = 0xFC190FE8u;          /* str d8,[sp,#-112]! (original insn) */
+    w[n++] = b_insn(cave2 + 0x30u, pc + 4u);  /* b back to enc+4 */
+    /* n == 13 -> logfn@0x34 tag@0x3C fmt@0x48 */
+    uintptr_t logfn = (uintptr_t)&__android_log_print;
+    memcpy(img + 0x34, &logfn, 8);
+    strcpy((char*)img + 0x3C, "PhiraAgent");
+    strcpy((char*)img + 0x48, "enc: std=%016lx p=%d g=%d b=%d s=%d");
+    size_t img_len = 0x48u + sizeof("enc: std=%016lx p=%d g=%d b=%d s=%d");
+
+    if (!patch_bytes(cave2, img, img_len)) {
+        LOGE("encode hook: write failed - skip");
+        return;
+    }
+    uint32_t b = b_insn(pc, cave2);
+    int64_t d1 = (int64_t)cave2 - (int64_t)pc;
+    if ((d1 & 3) || d1 > 0x7FFFFFFLL || d1 < -0x8000000LL) {
+        LOGW("encode hook: branch out of range - skip");
+        return;
+    }
+    if (!patch_word(pc, b)) {
+        LOGE("encode hook: branch patch failed - skip");
+        return;
+    }
+    LOGI("encode hook: patched @+0x%lx -> cave2 +0x%lx", enc_off, cave2 - rs);
+    report(env, "ENC: patched @+0x%lx", enc_off);
 }
 
 /* bonus by distance from enclosing function entry (proxy: last `ret`,
