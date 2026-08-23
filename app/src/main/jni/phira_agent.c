@@ -1020,22 +1020,22 @@ static int apply_jitter(JNIEnv* env, const profile_t* pf, uintptr_t rs,
     w[n++] = 0x5C000001u | (0x4Cu >> 2 << 5);  /* ldr d1,[pc,#0x4C] 1e6@0x74 */
     w[n++] = 0x1E610800u | (1u << 16);  /* fmul d0,d0,d1 -> offset us */
     w[n++] = 0x1E780005u;               /* fcvtzs w5,d0 (int us) */
+    w[n++] = 0xFD40AAC2u;               /* ldr d2,[x22,#0x150] sumsq f64 */
+    w[n++] = 0x5C000001u | (0x3Cu >> 2 << 5);  /* ldr d1,[pc,#0x3C] 1e6@0x74 */
+    w[n++] = 0x1E610800u | (1u << 16) | (2u << 5) | 2u;
+                                        /* fmul d2,d2,d1 -> sumsq*1e6 */
+    w[n++] = 0x1E780046u;               /* fcvtzs w6,d2 (int sq_us2) */
     w[n++] = 0x2A1903E3u;               /* mov w3,w25 (note id) */
     w[n++] = 0xD2800080u;               /* mov x0,#4 (ANDROID_LOG_INFO) */
-    w[n++] = 0x10000000u | ((0x48u >> 2) << 5) | (0x48u & 3) | 1u;
+    w[n++] = 0x10000000u | ((0x38u >> 2) << 5) | (0x38u & 3) | 1u;
                                         /* adr x1,tag@0x84 */
-    w[n++] = 0x10000000u | ((0x50u >> 2) << 5) | (0x50u & 3) | 2u;
+    w[n++] = 0x10000000u | ((0x40u >> 2) << 5) | (0x40u & 3) | 2u;
                                         /* adr x2,fmt@0x90 */
-    w[n++] = 0x58000000u | (0x38u >> 2 << 5) | 9u;  /* ldr x9,[pc,#0x38] logfn@0x7C */
+    w[n++] = 0x58000000u | (0x28u >> 2 << 5) | 9u;  /* ldr x9,[pc,#0x28] logfn@0x7C */
     w[n++] = 0xD63F0120u;               /* blr x9 (__android_log_print) */
     w[n++] = 0x1E604100u;               /* fmov d0,d8 (restore offset s) */
     w[n++] = 0x910162C0u;               /* add x0,x22,#0x58 */
     w[n++] = 0x2A1F03E1u;               /* mov w1,wzr */
-    w[n++] = 0xFD40AAC2u;               /* ldr d2,[x22,#0x150] sumsq f64 */
-    w[n++] = 0x5C000001u | (0x18u >> 2 << 5);  /* ldr d1,[pc,#0x18] 1e6@0x74 */
-    w[n++] = 0x1E610800u | (1u << 16) | (2u << 5) | 2u;
-                                        /* fmul d2,d2,d1 -> sumsq*1e6 */
-    w[n++] = 0x1E780046u;               /* fcvtzs w6,d2 (int sq_us2) */
     w[n++] = b_insn(cave + 0x68u, pc + 0x0Cu); /* b back to the bl */
     /* n == 27 instructions -> literals at 0x6C */
     double scale =
