@@ -1,0 +1,81 @@
+# phira-lsposed-test
+
+仅用于本地测试的 LSPosed 模块：在非自动游玩模式下，让 Phira 走其**原生 autoplay 判定路径**，
+但不携带任何 autoplay 标识（方向 1）。
+
+> ⚠️ 合规边界：仅供**自编译测试构建 + 本地/自建服务端**使用。不得指向官方/生产服务器。
+
+## 原理
+
+Phira 全部游戏逻辑在 `libphira.so`（Rust cdylib）。原生 autoplay 由
+`Judge::update` 入口的一个条件跳转控制（`prpr/src/judge.rs:412-416`，
+`res.config.autoplay()` 即 `config.mods & 1`）。本模块在该进程内定位这条
+条件分支并改写为无条件跳转（或 NOP），使判定走原装 `auto_play_update`；
+由于 `config.mods` 未被改动：
+
+- 游戏内无 "AUTOPLAY" 标识 / 模组图标 / 结算标记；
+- 计分与本地成绩保存走正常管线。
+
+## 弹性定位（不死偏移）
+
+release 二进制已 strip 且随版本变化，模块不做任何死定位：
+
+1. **PATCH_AT 直写（首选）**：profile 指令 `PATCH_AT <span偏移> <expect指令>`，
+   写入前校验原值、不符即拒绝；省略替换则自动推导 tbnz→无条件 B 同目标。
+   当前构建（Phira_0.8.2）内置默认已含该条目，无需任何 profile 也能注入；
+2. **结构扫描兜底**：`tbz/tbnz`（测 bit0）或 `tst wn,#1` + `b.cond` 指令形态 +
+   adrp/ldr 常量引用点门控 + 评分组选择；
+3. **显式 PATTERN 兜底**：profile 支持带通配符的字节模式。
+
+任一环节不确定 → **放弃，不写入任何字节**（fail-safe：歧义绝不写入）。
+
+### 适配未来版本
+
+无需改 C 代码，按优先级读取 profile（面板会回报实际来源）：
+
+1. `/sdcard/Documents/phira_autoplay_profile.txt`（热更，免重装；旧
+   `/data/local/tmp` 路径已废弃）
+2. APK 内 asset `phira_profile.txt`（改完推 CI 重编即可）
+3. 编译期内置默认（已含当前构建的 PATCH_AT，asset 加载失败也能注入）
+
+profile 语法见 `app/src/main/assets/phira_profile.txt` 头部注释。
+新版本失效时的排查步骤：
+
+```bash
+# 在自编译产物上反汇编，找 Judge::update（特征：附近字面量池含 0.08/0.16 的 f64）
+objdump -d --no-show-raw-insn libphira.so | less   # 搜索 "tbnz" / "tbz"
+```
+
+确认新形态后调整 `WINDOW/MAX_CAND/PROBE/PATTERN` 即可。
+
+## 构建
+
+编译完全由 GitHub Actions 云端执行（`.github/workflows/build.yml`）：
+push 到 main 或手动触发 → Artifacts 下载 `phira-lsposed-test-debug.apk`。本地不构建。
+
+## 使用
+
+1. 安装 APK，在 LSPosed 中启用本模块，作用域勾选你的 Phira 测试包名；
+2. **强制停止游戏后重新启动**（LSPosed 只对新启动的进程生效）；
+3. 游戏内顶部会出现「PhiraAgent 日志」悬浮面板（注入在应用自身视图层级中，
+   无需悬浮窗权限），点「关闭」可收起；完整日志：
+   ```bash
+   adb logcat -s PhiraAgent
+   ```
+4. 面板内容含义：
+   - `app created: <包名>` —— Hook 已生效（没看到 = 模块未注入：检查启用状态/作用域/重启）；
+   - `arm status=1 (注入成功)` —— 分支已改写；
+   - `目标 so 未出现` / `特征未匹配` / `候选歧义` —— 定位失败原因，logcat 有细节，
+     超时且从未见到目标库时会自动 dump 进程内全部可执行 so 列表便于排查。
+
+## 实现说明
+
+- Xposed API 以独立 `:stub` 模块 `compileOnly` 引入，**不打包进 APK**——若 APK 内
+  携带 `de.robv.*` 副本，可能遮蔽 LSPosed 注入的真实 API，导致模块"已启用但零反应"。
+
+## 工程
+
+- Java 入口：`MainHook`（hook `Instrumentation.callApplicationOnCreate`，进程内仅触发一次）
+- JNI 代理：`PhiraAgent.arm()` 阻塞轮询 `/proc/self/maps` 直到 `libphira.so` 出现，
+  完成扫描→校验→4 字节 patch→复读校验（超时 120s）
+- Xposed API 以编译期 stub 形式提供（运行时由 LSPosed 注入真实实现），零外部依赖
